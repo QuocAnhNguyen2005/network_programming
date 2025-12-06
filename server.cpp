@@ -1,6 +1,9 @@
 #include <iostream>
 #include <cstring>
-#include "protocol.h" // Include the protocol header
+#include <thread>          // For std::thread
+#include <vector>          // For storing active threads
+#include "protocol.h"      // Include the protocol header
+#include "broker.h"        // Include the message broker
 
 #ifdef _WIN32
     #include <winsock2.h>    // Winsock2 API: sockets on Windows (must call WSAStartup())
@@ -24,6 +27,177 @@
     #define CLOSE_SOCKET(s) close(s) // Use close() on POSIX systems
 #endif
 
+// Global message broker instance (shared across all client threads)
+MessageBroker g_broker;
+
+// Client handler function - runs in a separate thread for each connected client
+void handleClient(int clientId, SOCKET clientSocket) {
+    std::cout << "[THREAD " << clientId << "] Client handler started." << std::endl;
+    
+    char buffer[MAX_BUFFER_SIZE]; // buffer for receiving packet header
+    int bytesRecv = 0;
+
+    while (true) {
+        // Receive the packet header from client
+        bytesRecv = recv(clientSocket, buffer, sizeof(PacketHeader), 0);
+        
+        if (bytesRecv == SOCKET_ERROR) {
+            // Error on recv
+#ifdef _WIN32
+            std::cerr << "[THREAD " << clientId << "] recv() failed: " << WSAGetLastError() << std::endl;
+#else
+            std::cerr << "[THREAD " << clientId << "] recv() failed: " << strerror(errno) << std::endl;
+#endif
+            break; // exit recv loop on error
+        } else if (bytesRecv == 0) {
+            // Client closed the connection (graceful close)
+            std::cout << "[THREAD " << clientId << "] Client disconnected." << std::endl;
+            break; // exit recv loop
+        }
+
+        // Parse the received packet header
+        PacketHeader* header = (PacketHeader*)buffer;
+        std::cout << "[THREAD " << clientId << "] Received msgType=" << header->msgType 
+                  << ", payloadLen=" << header->payloadLength
+                  << ", sender=" << header->sender 
+                  << ", topic=" << header->topic << std::endl;
+
+        // Receive payload if needed
+        char payloadBuffer[MAX_BUFFER_SIZE];
+        std::memset(payloadBuffer, 0, MAX_BUFFER_SIZE);
+        
+        if (header->payloadLength > 0) {
+            int payloadRecv = recv(clientSocket, payloadBuffer, header->payloadLength, 0);
+            if (payloadRecv == SOCKET_ERROR) {
+#ifdef _WIN32
+                std::cerr << "[THREAD " << clientId << "] recv() payload failed: " << WSAGetLastError() << std::endl;
+#else
+                std::cerr << "[THREAD " << clientId << "] recv() payload failed: " << strerror(errno) << std::endl;
+#endif
+                break;
+            } else if (payloadRecv == 0) {
+                std::cout << "[THREAD " << clientId << "] Client disconnected while receiving payload." << std::endl;
+                break;
+            }
+            std::cout << "[THREAD " << clientId << "] Payload (" << payloadRecv << " bytes): " 
+                      << std::string(payloadBuffer, payloadRecv) << std::endl;
+        }
+
+        // Handle different message types
+        switch (header->msgType) {
+            case MSG_LOGIN: {
+                // Extract username from sender field
+                g_broker.registerClient(clientSocket, header->sender);
+                
+                // Send ACK back
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                std::cout << "[THREAD " << clientId << "] LOGIN ACK sent." << std::endl;
+                break;
+            }
+
+            case MSG_SUBSCRIBE: {
+                // Subscribe to topic
+                g_broker.subscribeToTopic(clientId, header->topic);
+                
+                // Send ACK
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                std::strcpy(ackHeader.topic, header->topic);
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                std::cout << "[THREAD " << clientId << "] SUBSCRIBE ACK sent for topic: " << header->topic << std::endl;
+                break;
+            }
+
+            case MSG_UNSUBSCRIBE: {
+                // Unsubscribe from topic
+                g_broker.unsubscribeFromTopic(clientId, header->topic);
+                
+                // Send ACK
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                std::strcpy(ackHeader.topic, header->topic);
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                std::cout << "[THREAD " << clientId << "] UNSUBSCRIBE ACK sent for topic: " << header->topic << std::endl;
+                break;
+            }
+
+            case MSG_PUBLISH_TEXT: {
+                // Publish text message to topic subscribers
+                int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+                std::cout << "[THREAD " << clientId << "] Published to " << sentCount << " subscribers on topic: " 
+                          << header->topic << std::endl;
+                
+                // Send ACK to publisher
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                std::strcpy(ackHeader.topic, header->topic);
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                break;
+            }
+
+            case MSG_PUBLISH_FILE: {
+                // Similar to text, but for files
+                int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+                std::cout << "[THREAD " << clientId << "] File published to " << sentCount << " subscribers." << std::endl;
+                
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                break;
+            }
+
+            case MSG_LOGOUT: {
+                std::cout << "[THREAD " << clientId << "] Client logout request received." << std::endl;
+                
+                // Send ACK
+                PacketHeader ackHeader;
+                std::memset(&ackHeader, 0, sizeof(ackHeader));
+                ackHeader.msgType = MSG_ACK;
+                ackHeader.payloadLength = 0;
+                std::strcpy(ackHeader.sender, "SERVER");
+                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                
+                // Close connection
+                break;
+            }
+
+            default: {
+                std::cout << "[THREAD " << clientId << "] Unknown message type: " << header->msgType << std::endl;
+                
+                // Send ERROR response
+                PacketHeader errHeader;
+                std::memset(&errHeader, 0, sizeof(errHeader));
+                errHeader.msgType = MSG_ERROR;
+                errHeader.payloadLength = 0;
+                std::strcpy(errHeader.sender, "SERVER");
+                send(clientSocket, (const char*)&errHeader, sizeof(PacketHeader), 0);
+                break;
+            }
+        }
+    }
+
+    // Cleanup: unregister client and close socket
+    g_broker.unregisterClient(clientId);
+    std::cout << "[THREAD " << clientId << "] Client handler terminated." << std::endl;
+}
+
 int main() {
     // Initialize Winsock on Windows (no-op on POSIX)
 #ifdef _WIN32
@@ -34,7 +208,7 @@ int main() {
     }
 #endif
 
-    std::cout << "Server is starting..." << std::endl;
+    std::cout << "=== PUB/SUB SERVER STARTING ===" << std::endl;
 
     // Create a TCP socket
     SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -50,7 +224,7 @@ int main() {
 
     // Allow address reuse to avoid bind errors after quick restart
     int opt = 1;
-    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)); // on POSIX cast not required; on Windows use char*
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
     // Bind to any address and DEFAULT_PORT from protocol.h
     struct sockaddr_in srvAddr;
@@ -84,101 +258,47 @@ int main() {
         return 1;
     }
 
-    std::cout << "Server listening on port " << DEFAULT_PORT << std::endl;
+    std::cout << "[MAIN] Server listening on port " << DEFAULT_PORT << std::endl;
+    std::cout << "[MAIN] Waiting for clients..." << std::endl;
 
-    // Accept one connection (example). In real server, loop and handle each client (thread/select/etc.)
-    struct sockaddr_in clientAddr;
-    socklen_t clientLen = sizeof(clientAddr);
-    SOCKET clientSock = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
-    if (clientSock == INVALID_SOCKET) {
-#ifdef _WIN32
-        std::cerr << "accept() failed: " << WSAGetLastError() << std::endl;
-#else
-        std::cerr << "accept() failed: " << strerror(errno) << std::endl;
-#endif
-        CLOSE_SOCKET(serverSocket);
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return 1;
-    }
+    // Vector to hold active client threads
+    std::vector<std::thread> clientThreads;
 
-    std::cout << "Client connected." << std::endl;
-
-    // Receive and handle client messages in a loop
-    char buffer[MAX_BUFFER_SIZE]; // buffer for receiving data
-    int bytesRecv = 0;
-
+    // Multi-client accept loop
+    int clientIdCounter = 0;
+    
     while (true) {
-        // Receive the packet header from client
-        bytesRecv = recv(clientSock, buffer, sizeof(PacketHeader), 0);
+        // Accept incoming connection
+        struct sockaddr_in clientAddr;
+        socklen_t clientLen = sizeof(clientAddr);
         
-        if (bytesRecv == SOCKET_ERROR) {
-            // Error on recv
+        SOCKET clientSock = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
+        
+        if (clientSock == INVALID_SOCKET) {
 #ifdef _WIN32
-            std::cerr << "recv() failed: " << WSAGetLastError() << std::endl;
+            std::cerr << "[MAIN] accept() failed: " << WSAGetLastError() << std::endl;
 #else
-            std::cerr << "recv() failed: " << strerror(errno) << std::endl;
+            std::cerr << "[MAIN] accept() failed: " << strerror(errno) << std::endl;
 #endif
-            break; // exit recv loop on error
-        } else if (bytesRecv == 0) {
-            // Client closed the connection (graceful close)
-            std::cout << "Client disconnected." << std::endl;
-            break; // exit recv loop
+            continue; // Try accepting next connection
         }
 
-        // Parse the received packet header
-        PacketHeader* header = (PacketHeader*)buffer;
-        std::cout << "Received message type: " << header->msgType 
-                  << ", payload length: " << header->payloadLength
-                  << ", sender: " << header->sender 
-                  << ", topic: " << header->topic << std::endl;
+        // New client connected
+        int clientId = clientIdCounter++;
+        std::cout << "[MAIN] *** New client connected: ID=" << clientId 
+                  << ", IP=" << inet_ntoa(clientAddr.sin_addr) 
+                  << ":" << ntohs(clientAddr.sin_port) << std::endl;
+        std::cout << "[MAIN] Total online clients: " << (g_broker.getOnlineClientCount() + 1) << std::endl;
 
-        // If there is a payload, receive it
-        if (header->payloadLength > 0) {
-            char payloadBuffer[MAX_BUFFER_SIZE];
-            int payloadRecv = recv(clientSock, payloadBuffer, header->payloadLength, 0);
-
-            if (payloadRecv == SOCKET_ERROR) {
-#ifdef _WIN32
-                std::cerr << "recv() payload failed: " << WSAGetLastError() << std::endl;
-#else
-                std::cerr << "recv() payload failed: " << strerror(errno) << std::endl;
-#endif
-                break;
-            } else if (payloadRecv == 0) {
-                std::cout << "Client disconnected while receiving payload." << std::endl;
-                break;
-            }
-
-            std::cout << "Payload received (" << payloadRecv << " bytes): " 
-                      << std::string(payloadBuffer, payloadRecv) << std::endl;
-        }
-
-        // Example: Send an acknowledgment back to client
-        // (Create a simple ACK packet and send it)
-        PacketHeader ackHeader;
-        std::memset(&ackHeader, 0, sizeof(ackHeader));
-        ackHeader.msgType = MSG_ACK;
-        ackHeader.payloadLength = 0;
-        std::strcpy(ackHeader.sender, "SERVER");
-        std::strcpy(ackHeader.topic, "");
-
-        int sendResult = send(clientSock, (const char*)&ackHeader, sizeof(PacketHeader), 0);
-        if (sendResult == SOCKET_ERROR) {
-#ifdef _WIN32
-            std::cerr << "send() ACK failed: " << WSAGetLastError() << std::endl;
-#else
-            std::cerr << "send() ACK failed: " << strerror(errno) << std::endl;
-#endif
-            break;
-        }
-
-        std::cout << "ACK sent to client." << std::endl;
+        // Create a thread to handle this client
+        // Use std::thread to spawn handleClient in background
+        clientThreads.push_back(std::thread(handleClient, clientId, clientSock));
+        
+        // Detach thread so it runs independently (server won't wait for it to finish)
+        clientThreads.back().detach();
     }
 
-    // Close client socket and server socket, cleanup Winsock
-    CLOSE_SOCKET(clientSock);
+    // Cleanup (unreachable in normal flow, but good practice)
     CLOSE_SOCKET(serverSocket);
 
 #ifdef _WIN32
