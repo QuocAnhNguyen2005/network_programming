@@ -105,7 +105,77 @@ int main() {
 
     std::cout << "Client connected." << std::endl;
 
-    // ... handle client (recv/send) ...
+    // Receive and handle client messages in a loop
+    char buffer[MAX_BUFFER_SIZE]; // buffer for receiving data
+    int bytesRecv = 0;
+
+    while (true) {
+        // Receive the packet header from client
+        bytesRecv = recv(clientSock, buffer, sizeof(PacketHeader), 0);
+        
+        if (bytesRecv == SOCKET_ERROR) {
+            // Error on recv
+#ifdef _WIN32
+            std::cerr << "recv() failed: " << WSAGetLastError() << std::endl;
+#else
+            std::cerr << "recv() failed: " << strerror(errno) << std::endl;
+#endif
+            break; // exit recv loop on error
+        } else if (bytesRecv == 0) {
+            // Client closed the connection (graceful close)
+            std::cout << "Client disconnected." << std::endl;
+            break; // exit recv loop
+        }
+
+        // Parse the received packet header
+        PacketHeader* header = (PacketHeader*)buffer;
+        std::cout << "Received message type: " << header->msgType 
+                  << ", payload length: " << header->payloadLength
+                  << ", sender: " << header->sender 
+                  << ", topic: " << header->topic << std::endl;
+
+        // If there is a payload, receive it
+        if (header->payloadLength > 0) {
+            char payloadBuffer[MAX_BUFFER_SIZE];
+            int payloadRecv = recv(clientSock, payloadBuffer, header->payloadLength, 0);
+
+            if (payloadRecv == SOCKET_ERROR) {
+#ifdef _WIN32
+                std::cerr << "recv() payload failed: " << WSAGetLastError() << std::endl;
+#else
+                std::cerr << "recv() payload failed: " << strerror(errno) << std::endl;
+#endif
+                break;
+            } else if (payloadRecv == 0) {
+                std::cout << "Client disconnected while receiving payload." << std::endl;
+                break;
+            }
+
+            std::cout << "Payload received (" << payloadRecv << " bytes): " 
+                      << std::string(payloadBuffer, payloadRecv) << std::endl;
+        }
+
+        // Example: Send an acknowledgment back to client
+        // (Create a simple ACK packet and send it)
+        PacketHeader ackHeader;
+        std::memset(&ackHeader, 0, sizeof(ackHeader));
+        ackHeader.msgType = MSG_ACK;
+        ackHeader.payloadLength = 0;
+        std::strcpy(ackHeader.sender, "SERVER");
+        std::strcpy(ackHeader.topic, "");
+
+        int sendResult = send(clientSock, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+        if (sendResult == SOCKET_ERROR) {
+#ifdef _WIN32
+            std::cerr << "send() ACK failed: " << WSAGetLastError() << std::endl;
+#else
+            std::cerr << "send() ACK failed: " << strerror(errno) << std::endl;
+#endif
+            break;
+        }
+
+        std::cout << "ACK sent to client." << std::endl;
+    }
 
     // Close client socket and server socket, cleanup Winsock
     CLOSE_SOCKET(clientSock);
