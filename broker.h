@@ -196,6 +196,22 @@ public:
         }
         return std::vector<int>();
     }
+
+    // Check if username is already taken by an online client
+    // Returns true if username exists and client is connected
+    bool isUsernameTaken(const char* username) {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        
+        // Iterate through all connected clients
+        for (auto const& pair : clients) {
+            auto const& client = pair.second;
+            // Check if client is connected AND username matches (case-sensitive)
+            if (client && client->isConnected && std::strcmp(client->username, username) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 #endif // BROKER_H

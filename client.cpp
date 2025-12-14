@@ -16,6 +16,7 @@
 #include <fstream>
 #include <cstring>
 #include <atomic>
+#include <chrono>       // For std::chrono::milliseconds in sleep_for
 
 #include "protocol.h" // uses PacketHeader, MessageType, DEFAULT_PORT, etc. :contentReference[oaicite:2]{index=2}
 
@@ -296,7 +297,8 @@ int main(int argc, char **argv)
         }
         else if (line.rfind("/sendfile ", 0) == 0)
         {
-            // /sendfile <topic> <path>
+            // Format: /sendfile <topic> <filepath>
+            // This version sends file in chunks (streaming) instead of all at once
             size_t pos = line.find(' ', 10);
             if (pos == std::string::npos)
             {
@@ -305,45 +307,60 @@ int main(int argc, char **argv)
             }
             std::string topic = line.substr(10, pos - 10);
             std::string path = line.substr(pos + 1);
-            std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+
+            // Open file for reading in binary mode
+            std::ifstream ifs(path, std::ios::binary);
             if (!ifs)
             {
                 std::cerr << "Cannot open file: " << path << "\n";
                 continue;
             }
-            std::streamsize size = ifs.tellg();
-            ifs.seekg(0, std::ios::beg);
-            if (size <= 0 || size > MAX_BUFFER_SIZE)
+
+            // Send file in chunks
+            char fileBuf[MAX_BUFFER_SIZE];
+            uint32_t totalBytesSent = 0;
+            bool sendError = false;
+
+            while (ifs.read(fileBuf, sizeof(fileBuf)) || ifs.gcount() > 0)
             {
-                std::cerr << "File empty or too large for single-chunk demo (limit " << MAX_BUFFER_SIZE << " bytes).\n";
-                continue;
-            }
-            std::vector<char> data((size_t)size);
-            if (!ifs.read(data.data(), size))
-            {
-                std::cerr << "Read error\n";
-                continue;
+                int bytesRead = (int)ifs.gcount(); // Number of bytes actually read
+                
+                // Create packet header for this chunk
+                PacketHeader hdr;
+                std::memset(&hdr, 0, sizeof(hdr));
+                hdr.msgType = MSG_PUBLISH_FILE;          // File transmission message
+                hdr.payloadLength = (uint32_t)bytesRead; // Size of this chunk
+                hdr.messageId = nextMessageId++;
+                std::strncpy(hdr.sender, username, MAX_USERNAME_LEN - 1);
+                std::strncpy(hdr.topic, topic.c_str(), MAX_TOPIC_LEN - 1);
+
+                // Send header
+                if (!sendAll(sock, (char *)&hdr, sizeof(hdr)))
+                {
+                    std::cerr << "Error sending file header\n";
+                    sendError = true;
+                    break;
+                }
+
+                // Send payload chunk
+                if (!sendAll(sock, fileBuf, bytesRead))
+                {
+                    std::cerr << "Error sending file chunk\n";
+                    sendError = true;
+                    break;
+                }
+
+                totalBytesSent += bytesRead;
+                std::cout << "[SENDING] Chunk sent: " << bytesRead << " bytes (Total: " << totalBytesSent << " bytes)\n";
+
+                // Small delay to avoid socket buffer overflow (optional but recommended for large files)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 
-            PacketHeader hdr;
-            std::memset(&hdr, 0, sizeof(hdr));
-            hdr.msgType = MSG_PUBLISH_FILE;
-            hdr.payloadLength = (uint32_t)size;
-            hdr.messageId = nextMessageId++;
-            std::strncpy(hdr.sender, username, MAX_USERNAME_LEN - 1);
-            std::strncpy(hdr.topic, topic.c_str(), MAX_TOPIC_LEN - 1);
-
-            if (!sendAll(sock, (char *)&hdr, sizeof(hdr)))
+            if (!sendError)
             {
-                std::cerr << "send header failed\n";
-                break;
+                std::cout << "[SENT] File transfer completed. Total: " << totalBytesSent << " bytes sent to topic '" << topic << "'\n";
             }
-            if (!sendAll(sock, data.data(), (int)hdr.payloadLength))
-            {
-                std::cerr << "send file failed\n";
-                break;
-            }
-            std::cout << "[SENT] FILE " << path << " to topic " << topic << "\n";
         }
         else if (line == "/logout")
         {

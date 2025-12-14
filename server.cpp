@@ -86,17 +86,46 @@ void handleClient(int clientId, SOCKET clientSocket) {
         // Handle different message types
         switch (header->msgType) {
             case MSG_LOGIN: {
-                // Extract username from sender field
+                // Check if username is already taken by another online client
+                if (g_broker.isUsernameTaken(header->sender)) {
+                    std::cout << "[THREAD " << clientId << "] LOGIN REJECTED: Username '" << header->sender 
+                              << "' already taken." << std::endl;
+                    
+                    // Send ERROR response to client
+                    PacketHeader errHeader;
+                    std::memset(&errHeader, 0, sizeof(errHeader));
+                    errHeader.msgType = MSG_ERROR;
+                    errHeader.payloadLength = 0;
+                    std::strcpy(errHeader.sender, "SERVER");
+                    std::string errMsg = "Username already taken";
+                    errHeader.payloadLength = (uint32_t)errMsg.size();
+                    
+                    send(clientSocket, (const char*)&errHeader, sizeof(PacketHeader), 0);
+                    if (errHeader.payloadLength > 0) {
+                        send(clientSocket, errMsg.c_str(), errHeader.payloadLength, 0);
+                    }
+                    
+                    // Close connection and exit thread
+                    CLOSE_SOCKET(clientSocket);
+                    break;
+                }
+                
+                // Register the client in broker (store username and socket)
                 g_broker.registerClient(clientSocket, header->sender);
                 
-                // Send ACK back
+                // [AUTO-SUBSCRIBE] Automatically subscribe client to topic with their username
+                // This allows other clients to send direct messages to this user by publishing to <username> topic
+                g_broker.subscribeToTopic(clientId, header->sender);
+                std::cout << "[THREAD " << clientId << "] Auto-subscribed to personal topic: " << header->sender << std::endl;
+                
+                // Send LOGIN ACK back
                 PacketHeader ackHeader;
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
                 std::strcpy(ackHeader.sender, "SERVER");
                 send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
-                std::cout << "[THREAD " << clientId << "] LOGIN ACK sent." << std::endl;
+                std::cout << "[THREAD " << clientId << "] LOGIN ACK sent for user: " << header->sender << std::endl;
                 break;
             }
 
