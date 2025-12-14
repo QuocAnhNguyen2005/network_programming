@@ -39,29 +39,42 @@ typedef int socket_t;
 #define SOCKET_ERROR -1
 #endif
 
-// Helpers: send all bytes, recv all bytes
+// ===== OPTIMIZATION: Reliable send - ensure all bytes transmitted =====
+// Purpose: Guarantee message delivery across network fragmentation
+// - Standard send() can return partial counts (e.g., 100 bytes sent of 1000)
+// - Loop ensures loop continues until all bytes successfully sent
+// - Critical for binary data (files) and structured packets
+// - Input validation: reject null pointers and invalid sizes
 bool sendAll(socket_t sock, const char *data, int total)
 {
+    if (total <= 0 || !data) return false;
+    
     int sent = 0;
     while (sent < total)
     {
         int n = send(sock, data + sent, total - sent, 0);
-        if (n == SOCKET_ERROR)
+        if (n == SOCKET_ERROR || n <= 0)
             return false;
         sent += n;
     }
     return true;
 }
 
+// ===== OPTIMIZATION: Reliable recv - ensure all bytes received =====
+// Purpose: Guarantee message arrival from network fragmentation
+// - Standard recv() can return partial counts
+// - Loop ensures we read all expected bytes before parsing
+// - Prevents incomplete packet headers/payloads from being processed
+// - Input validation: reject null pointers and invalid sizes
 bool recvAll(socket_t sock, char *buffer, int total)
 {
+    if (total <= 0 || !buffer) return false;
+    
     int recvd = 0;
     while (recvd < total)
     {
         int n = recv(sock, buffer + recvd, total - recvd, 0);
-        if (n == 0)
-            return false; // connection closed
-        if (n == SOCKET_ERROR)
+        if (n <= 0)  // 0 = connection closed, <0 = error
             return false;
         recvd += n;
     }
@@ -76,41 +89,91 @@ void receiverThread(socket_t sock)
     while (running)
     {
         PacketHeader header;
-        // read header
+        std::memset(&header, 0, sizeof(header));
+        
+        // ===== OPTIMIZATION: Reliable header reception =====
+        // Purpose: Guarantee complete packet headers before processing
+        // - Headers are fixed 64-byte structures critical for parsing
+        // - recvAll ensures we never process partial headers
+        // - Prevents packet structure corruption from network fragmentation
         if (!recvAll(sock, (char *)&header, sizeof(PacketHeader)))
         {
             // Only print error if it's not a graceful shutdown (running flag still true)
             if (running) {
-                std::cerr << "[RECV] Connection closed or error while reading header.\n";
+                std::cerr << "\n[RECV] Connection closed or error while reading header.\n";
             }
             running = false;
             break;
         }
 
-        // Print basic header info
-        std::cout << "\n[INCOMING] msgType=" << header.msgType
-                  << " messageId=" << header.messageId
-                  << " from=" << header.sender
-                  << " topic=" << header.topic
-                  << " payloadLen=" << header.payloadLength
-                  << "\n";
+        // ===== OPTIMIZATION: Payload size validation early =====
+        // Purpose: Reject malformed packets before allocation
+        // - Prevents crashes from extremely large payload claims
+        // - Protects against DoS attacks with fake size fields
+        // - Enforces MAX_MESSAGE_SIZE limit on client side too
+        if (header.payloadLength > MAX_MESSAGE_SIZE) {
+            std::cerr << "\n[RECV] Invalid payload size: " << header.payloadLength << "\n";
+            running = false;
+            break;
+        }
 
         // Read payload if present
         if (header.payloadLength > 0)
         {
+            // ===== OPTIMIZATION: Buffer size check before recv =====
+            // Purpose: Prevent stack buffer overflow
+            // - MAX_BUFFER_SIZE is 4KB, payloads larger need chunked transfer
+            // - Reject single-buffer payloads larger than MAX_BUFFER_SIZE
+            if (header.payloadLength > MAX_BUFFER_SIZE) {
+                std::cerr << "\n[RECV] Payload too large: " << header.payloadLength << " bytes\n";
+                running = false;
+                break;
+            }
+            
             std::vector<char> payload(header.payloadLength + 1);
+            // ===== OPTIMIZATION: Reliable payload reception =====
+            // Purpose: Ensure complete payload arrives before processing
+            // - Large files may arrive in multiple TCP packets
+            // - recvAll loops until all bytes received
             if (!recvAll(sock, payload.data(), header.payloadLength))
             {
                 if (running) {
-                    std::cerr << "[RECV] Error reading payload.\n";
+                    std::cerr << "\n[RECV] Error reading payload.\n";
                 }
                 running = false;
                 break;
             }
             payload[header.payloadLength] = '\0';
-            // Print as text (if binary, this may be garbage)
-            std::cout << "[INCOMING][payload]:\n"
-                      << std::string(payload.data(), header.payloadLength) << "\n";
+
+            // ===== OPTIMIZATION: Type-aware message formatting =====
+            // Purpose: Display different message types appropriately
+            // - MSG_PUBLISH_TEXT: Show full content for readability
+            // - MSG_PUBLISH_FILE: Show only size, NOT binary data (prevents terminal corruption)
+            // - Other types: Generic display with metadata
+            // Handle different message types with appropriate display
+            if (header.msgType == MSG_PUBLISH_TEXT) {
+                // Text messages: display full content
+                std::cout << "\n[MSG from " << header.sender << " in '" << header.topic << "']: " 
+                          << std::string(payload.data(), header.payloadLength) << "\n";
+            } 
+            else if (header.msgType == MSG_PUBLISH_FILE) {
+                // File chunks: only notify receipt, don't print binary content
+                // (Binary content would corrupt terminal display)
+                std::cout << "\n[FILE] Received chunk (" << header.payloadLength 
+                          << " bytes) from " << header.sender 
+                          << " in topic '" << header.topic 
+                          << "' (Binary data - not displayed)\n";
+            }
+            else {
+                // Other message types: show type and size
+                std::cout << "\n[INCOMING] msgType=" << header.msgType 
+                          << " | size=" << header.payloadLength 
+                          << " bytes | from=" << header.sender << "\n";
+            }
+        } else if (header.msgType == MSG_ACK) {
+            std::cout << "\n[ACK] Message ID " << header.messageId << " acknowledged\n";
+        } else if (header.msgType == MSG_ERROR) {
+            std::cout << "\n[ERROR] Server returned error\n";
         }
         std::cout << "> "; // prompt
         std::flush(std::cout);
@@ -191,9 +254,14 @@ int main(int argc, char **argv)
         if (line.rfind("/login ", 0) == 0)
         {
             std::string user = line.substr(7);
-            if (user.empty())
+            // ===== OPTIMIZATION: Validate username input length =====
+            // Purpose: Reject oversized usernames before sending to server
+            // - Prevents creating packets with invalid data
+            // - Provides immediate user feedback for input errors
+            // - Matches MAX_USERNAME_LEN limit defined in protocol.h
+            if (user.empty() || user.length() >= MAX_USERNAME_LEN)
             {
-                std::cout << "Usage: /login <username>\n";
+                std::cout << "Usage: /login <username> (max " << MAX_USERNAME_LEN-1 << " chars)\n";
                 continue;
             }
             std::strncpy(username, user.c_str(), MAX_USERNAME_LEN - 1);
@@ -215,9 +283,14 @@ int main(int argc, char **argv)
         else if (line.rfind("/subscribe ", 0) == 0)
         {
             std::string topic = line.substr(11);
-            if (topic.empty())
+            // ===== OPTIMIZATION: Validate topic name input =====
+            // Purpose: Reject invalid topic names before sending
+            // - Ensures topics match MAX_TOPIC_LEN constraint
+            // - Empty topics are meaningless, reject early
+            // - Prevents wasting network bandwidth on bad requests
+            if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
             {
-                std::cout << "Usage: /subscribe <topic>\n";
+                std::cout << "Usage: /subscribe <topic> (max " << MAX_TOPIC_LEN-1 << " chars)\n";
                 continue;
             }
 
@@ -239,9 +312,13 @@ int main(int argc, char **argv)
         else if (line.rfind("/unsubscribe ", 0) == 0)
         {
             std::string topic = line.substr(13);
-            if (topic.empty())
+            // ===== OPTIMIZATION: Validate topic name for unsubscribe =====
+            // Purpose: Catch bad unsubscribe requests before network transmission
+            // - Prevents sending requests for invalid topics
+            // - Reduces unnecessary broker operations for bad input
+            if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
             {
-                std::cout << "Usage: /unsubscribe <topic>\n";
+                std::cout << "Usage: /unsubscribe <topic> (max " << MAX_TOPIC_LEN-1 << " chars)\n";
                 continue;
             }
 
@@ -271,9 +348,16 @@ int main(int argc, char **argv)
             }
             std::string topic = line.substr(9, pos - 9);
             std::string msg = line.substr(pos + 1);
-            if (topic.empty() || msg.empty())
+            // ===== OPTIMIZATION: Multi-constraint publish validation =====
+            // Purpose: Prevent sending malformed publish requests
+            // - Topic validation: matches server MAX_TOPIC_LEN
+            // - Message validation: not empty and fits in single buffer
+            // - Prevents network traffic with invalid data
+            // - Provides user feedback before attempting send
+            if (topic.empty() || topic.length() >= MAX_TOPIC_LEN || msg.empty() || msg.length() > MAX_BUFFER_SIZE)
             {
                 std::cout << "Usage: /publish <topic> <message>\n";
+                std::cout << "  Topic max: " << MAX_TOPIC_LEN-1 << " chars, Message max: " << MAX_BUFFER_SIZE << " bytes\n";
                 continue;
             }
 
@@ -313,11 +397,36 @@ int main(int argc, char **argv)
             std::string topic = line.substr(10, pos - 10);
             std::string path = line.substr(pos + 1);
 
+            // ===== OPTIMIZATION: Topic name validation for file transfer =====
+            // Purpose: Prevent invalid topic names in file publish
+            // - Matches constraint checking from subscribe command
+            // - Prevents creating malformed file transfer requests
+            if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
+            {
+                std::cout << "Invalid topic name (max " << MAX_TOPIC_LEN-1 << " chars)\n";
+                continue;
+            }
+
             // Open file for reading in binary mode
             std::ifstream ifs(path, std::ios::binary);
             if (!ifs)
             {
                 std::cerr << "Cannot open file: " << path << "\n";
+                continue;
+            }
+            
+            // ===== OPTIMIZATION: File size validation before transfer =====
+            // Purpose: Prevent attempting to transfer oversized files
+            // - Check file size before starting send loop
+            // - 10MB limit matches MAX_MESSAGE_SIZE constraint
+            // - Gives user immediate feedback instead of hanging during transfer
+            // - Prevents exhausting disk quota with large file chunks
+            ifs.seekg(0, std::ios::end);
+            size_t fileSize = ifs.tellg();
+            ifs.seekg(0, std::ios::beg);
+            
+            if (fileSize > (10 * 1024 * 1024)) {  // 10MB limit
+                std::cerr << "File too large (max 10MB): " << path << "\n";
                 continue;
             }
 

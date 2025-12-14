@@ -30,28 +30,56 @@
 // Global message broker instance (shared across all client threads)
 MessageBroker g_broker;
 
+// ===== OPTIMIZATION: Reliable socket operations =====
+// Purpose: Ensure all bytes are transmitted/received, handle partial operations
+// - Standard recv/send can return partial data counts
+// - We loop until all bytes transferred to guarantee message integrity
+// - Critical for binary data like files and structured packet headers
+
+// Receive all bytes reliably
+bool recvAllBytes(SOCKET sock, char* buffer, int totalBytes) {
+    int recvd = 0;
+    while (recvd < totalBytes) {
+        int n = recv(sock, buffer + recvd, totalBytes - recvd, 0);
+        if (n <= 0) return false;  // Connection closed or error
+        recvd += n;
+    }
+    return true;
+}
+
+// Send all bytes reliably
+bool sendAllBytes(SOCKET sock, const char* buffer, int totalBytes) {
+    int sent = 0;
+    while (sent < totalBytes) {
+        int n = send(sock, buffer + sent, totalBytes - sent, 0);
+        if (n <= 0) return false;  // Error or connection closed
+        sent += n;
+    }
+    return true;
+}
+
 // Client handler function - runs in a separate thread for each connected client
 void handleClient(int clientId, SOCKET clientSocket) {
     std::cout << "[THREAD " << clientId << "] Client handler started." << std::endl;
     
     char buffer[MAX_BUFFER_SIZE]; // buffer for receiving packet header
-    int bytesRecv = 0;
+    // ===== OPTIMIZATION: Track login state =====
+    // Purpose: Properly log connection state for debugging and cleanup
+    // - Know if client successfully authenticated before disconnecting
+    // - Helps identify network vs authentication failures
+    bool clientLoggedIn = false;  // Track login state
 
     while (true) {
-        // Receive the packet header from client
-        bytesRecv = recv(clientSocket, buffer, sizeof(PacketHeader), 0);
-        
-        if (bytesRecv == SOCKET_ERROR) {
-            // Error on recv
-#ifdef _WIN32
-            std::cerr << "[THREAD " << clientId << "] recv() failed: " << WSAGetLastError() << std::endl;
-#else
-            std::cerr << "[THREAD " << clientId << "] recv() failed: " << strerror(errno) << std::endl;
-#endif
-            break; // exit recv loop on error
-        } else if (bytesRecv == 0) {
-            // Client closed the connection (graceful close)
-            std::cout << "[THREAD " << clientId << "] Client disconnected." << std::endl;
+        // ===== OPTIMIZATION: Use reliable receive function =====
+        // Purpose: Ensure packet headers arrive completely
+        // - Prevents partial header reads that corrupt message parsing
+        // - Handles network fragmentation transparently
+        if (!recvAllBytes(clientSocket, buffer, sizeof(PacketHeader))) {
+            if (clientLoggedIn) {
+                std::cout << "[THREAD " << clientId << "] Client disconnected." << std::endl;
+            } else {
+                std::cout << "[THREAD " << clientId << "] Connection closed before login." << std::endl;
+            }
             break; // exit recv loop
         }
 
@@ -62,35 +90,64 @@ void handleClient(int clientId, SOCKET clientSocket) {
                   << ", sender=" << header->sender 
                   << ", topic=" << header->topic << std::endl;
 
+        // ===== OPTIMIZATION: Validate payload size before allocation =====
+        // Purpose: Prevent buffer overflow and DoS attacks
+        // - Reject oversized payloads before processing
+        // - Protects against malicious clients sending huge buffers
+        // - Enforces MAX_MESSAGE_SIZE limit across all operations
+        if (header->payloadLength > MAX_MESSAGE_SIZE) {
+            std::cerr << "[THREAD " << clientId << "] Payload exceeds max size: " << header->payloadLength << std::endl;
+            break;  // Close connection on invalid payload
+        }
+
+        
         // Receive payload if needed
         char payloadBuffer[MAX_BUFFER_SIZE];
         std::memset(payloadBuffer, 0, MAX_BUFFER_SIZE);
         
         if (header->payloadLength > 0) {
-            int payloadRecv = recv(clientSocket, payloadBuffer, header->payloadLength, 0);
-            if (payloadRecv == SOCKET_ERROR) {
-#ifdef _WIN32
-                std::cerr << "[THREAD " << clientId << "] recv() payload failed: " << WSAGetLastError() << std::endl;
-#else
-                std::cerr << "[THREAD " << clientId << "] recv() payload failed: " << strerror(errno) << std::endl;
-#endif
-                break;
-            } else if (payloadRecv == 0) {
+            // ===== OPTIMIZATION: Bounds checking before socket read =====
+            // Purpose: Prevent buffer overflow on read
+            // - Check if payload fits in our buffer before recv() call
+            // - Protects against malformed packets claiming size > MAX_BUFFER_SIZE
+            if (header->payloadLength > sizeof(payloadBuffer)) {
+                std::cerr << "[THREAD " << clientId << "] Payload buffer overflow attempt: " << header->payloadLength << std::endl;
+                break;  // Close connection
+            }
+            
+            // ===== OPTIMIZATION: Reliable receive for payload =====
+            // Purpose: Ensure complete payload delivery
+            // - Large payloads may arrive in multiple TCP packets
+            // - recvAllBytes ensures we get every byte before processing
+            if (!recvAllBytes(clientSocket, payloadBuffer, header->payloadLength)) {
                 std::cout << "[THREAD " << clientId << "] Client disconnected while receiving payload." << std::endl;
                 break;
             }
-            std::cout << "[THREAD " << clientId << "] Payload (" << payloadRecv << " bytes): " 
-                      << std::string(payloadBuffer, payloadRecv) << std::endl;
-        }
-
-        // Handle different message types
+            std::cout << "[THREAD " << clientId << "] Received " << header->payloadLength << " bytes payload" << std::endl;
+        }        // Handle different message types
         switch (header->msgType) {
             case MSG_LOGIN: {
+                // ===== OPTIMIZATION: Validate username before broker operations =====
+                // Purpose: Reject invalid credentials early before authentication
+                // - Empty or oversized usernames indicate client errors
+                // - Prevents storing malformed usernames in broker
+                // - Reduces unnecessary broker operations for bad requests
+                if (strlen(header->sender) == 0 || strlen(header->sender) >= MAX_USERNAME_LEN) {
+                    std::cout << "[THREAD " << clientId << "] LOGIN REJECTED: Invalid username length." << std::endl;
+                    
+                    PacketHeader errHeader;
+                    std::memset(&errHeader, 0, sizeof(errHeader));
+                    errHeader.msgType = MSG_ERROR;
+                    errHeader.payloadLength = 0;
+                    std::strcpy(errHeader.sender, "SERVER");
+                    sendAllBytes(clientSocket, (const char*)&errHeader, sizeof(PacketHeader));
+                    
+                    CLOSE_SOCKET(clientSocket);
+                    return;  // Exit thread
+                }
+                
                 // Check if username is already taken by another online client
                 if (g_broker.isUsernameTaken(header->sender)) {
-                    std::cout << "[THREAD " << clientId << "] LOGIN REJECTED: Username '" << header->sender 
-                              << "' already taken." << std::endl;
-                    
                     // Send ERROR response to client
                     PacketHeader errHeader;
                     std::memset(&errHeader, 0, sizeof(errHeader));
@@ -100,18 +157,19 @@ void handleClient(int clientId, SOCKET clientSocket) {
                     std::string errMsg = "Username already taken";
                     errHeader.payloadLength = (uint32_t)errMsg.size();
                     
-                    send(clientSocket, (const char*)&errHeader, sizeof(PacketHeader), 0);
+                    sendAllBytes(clientSocket, (const char*)&errHeader, sizeof(PacketHeader));
                     if (errHeader.payloadLength > 0) {
-                        send(clientSocket, errMsg.c_str(), errHeader.payloadLength, 0);
+                        sendAllBytes(clientSocket, errMsg.c_str(), errHeader.payloadLength);
                     }
                     
                     // Close connection and exit thread
                     CLOSE_SOCKET(clientSocket);
-                    break;
+                    return;  // Exit thread
                 }
                 
                 // Register the client in broker (store username and socket)
                 g_broker.registerClient(clientSocket, header->sender);
+                clientLoggedIn = true;  // Mark as logged in
                 
                 // [AUTO-SUBSCRIBE] Automatically subscribe client to topic with their username
                 // This allows other clients to send direct messages to this user by publishing to <username> topic
@@ -123,14 +181,19 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 std::cout << "[THREAD " << clientId << "] LOGIN ACK sent for user: " << header->sender << std::endl;
                 break;
             }
 
             case MSG_SUBSCRIBE: {
                 // Subscribe to topic
+                if (strlen(header->topic) == 0) {
+                    std::cerr << "[THREAD " << clientId << "] Invalid topic name in SUBSCRIBE" << std::endl;
+                    break;
+                }
                 g_broker.subscribeToTopic(clientId, header->topic);
                 
                 // Send ACK
@@ -138,15 +201,20 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
                 std::strcpy(ackHeader.topic, header->topic);
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 std::cout << "[THREAD " << clientId << "] SUBSCRIBE ACK sent for topic: " << header->topic << std::endl;
                 break;
             }
 
             case MSG_UNSUBSCRIBE: {
                 // Unsubscribe from topic
+                if (strlen(header->topic) == 0) {
+                    std::cerr << "[THREAD " << clientId << "] Invalid topic name in UNSUBSCRIBE" << std::endl;
+                    break;
+                }
                 g_broker.unsubscribeFromTopic(clientId, header->topic);
                 
                 // Send ACK
@@ -154,15 +222,20 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
                 std::strcpy(ackHeader.topic, header->topic);
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 std::cout << "[THREAD " << clientId << "] UNSUBSCRIBE ACK sent for topic: " << header->topic << std::endl;
                 break;
             }
 
             case MSG_PUBLISH_TEXT: {
                 // Publish text message to topic subscribers
+                if (strlen(header->topic) == 0) {
+                    std::cerr << "[THREAD " << clientId << "] Invalid topic name in PUBLISH_TEXT" << std::endl;
+                    break;
+                }
                 int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
                 std::cout << "[THREAD " << clientId << "] Published to " << sentCount << " subscribers on topic: " 
                           << header->topic << std::endl;
@@ -172,14 +245,19 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
                 std::strcpy(ackHeader.topic, header->topic);
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 break;
             }
 
             case MSG_PUBLISH_FILE: {
                 // Similar to text, but for files
+                if (strlen(header->topic) == 0) {
+                    std::cerr << "[THREAD " << clientId << "] Invalid topic name in PUBLISH_FILE" << std::endl;
+                    break;
+                }
                 int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
                 std::cout << "[THREAD " << clientId << "] File published to " << sentCount << " subscribers." << std::endl;
                 
@@ -187,21 +265,25 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                std::strcpy(ackHeader.topic, header->topic);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 break;
             }
 
             case MSG_LOGOUT: {
                 std::cout << "[THREAD " << clientId << "] Client logout request received." << std::endl;
+                clientLoggedIn = false;
                 
                 // Send ACK
                 PacketHeader ackHeader;
                 std::memset(&ackHeader, 0, sizeof(ackHeader));
                 ackHeader.msgType = MSG_ACK;
                 ackHeader.payloadLength = 0;
+                ackHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(ackHeader.sender, "SERVER");
-                send(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&ackHeader, sizeof(PacketHeader));
                 
                 // Close connection
                 break;
@@ -215,8 +297,9 @@ void handleClient(int clientId, SOCKET clientSocket) {
                 std::memset(&errHeader, 0, sizeof(errHeader));
                 errHeader.msgType = MSG_ERROR;
                 errHeader.payloadLength = 0;
+                errHeader.messageId = header->messageId;  // Echo back message ID
                 std::strcpy(errHeader.sender, "SERVER");
-                send(clientSocket, (const char*)&errHeader, sizeof(PacketHeader), 0);
+                sendAllBytes(clientSocket, (const char*)&errHeader, sizeof(PacketHeader));
                 break;
             }
         }

@@ -127,7 +127,21 @@ public:
 
     // Publish a message to all subscribers of a topic
     // Returns number of clients the message was sent to
+    // ===== OPTIMIZATION: Input validation before processing =====
+    // Purpose: Catch malformed requests early, prevent null pointer dereferences
+    // - Check for null/invalid topic, prevents undefined behavior
+    // - Check payload size limit, prevents buffer overflow and DoS attacks
     int publishToTopic(const char* topic, const PacketHeader& header, const char* payload, int payloadLen) {
+        // Validate inputs
+        if (!topic || payloadLen < 0) {
+            std::cerr << "[BROKER] Invalid publish parameters" << std::endl;
+            return 0;
+        }
+        if (payloadLen > MAX_MESSAGE_SIZE) {
+            std::cerr << "[BROKER] Message exceeds maximum size (" << payloadLen << " bytes)" << std::endl;
+            return 0;
+        }
+        
         std::vector<int> subscriberIds;
         
         // Get list of subscribers (under lock)
