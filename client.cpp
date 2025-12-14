@@ -79,7 +79,10 @@ void receiverThread(socket_t sock)
         // read header
         if (!recvAll(sock, (char *)&header, sizeof(PacketHeader)))
         {
-            std::cerr << "[RECV] Connection closed or error while reading header.\n";
+            // Only print error if it's not a graceful shutdown (running flag still true)
+            if (running) {
+                std::cerr << "[RECV] Connection closed or error while reading header.\n";
+            }
             running = false;
             break;
         }
@@ -98,7 +101,9 @@ void receiverThread(socket_t sock)
             std::vector<char> payload(header.payloadLength + 1);
             if (!recvAll(sock, payload.data(), header.payloadLength))
             {
-                std::cerr << "[RECV] Error reading payload.\n";
+                if (running) {
+                    std::cerr << "[RECV] Error reading payload.\n";
+                }
                 running = false;
                 break;
             }
