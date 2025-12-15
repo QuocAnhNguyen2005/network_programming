@@ -4,11 +4,13 @@
 #include <cstdint> // using for uint32_t, uint64_t
 #include <cstring> // using for memset
 
-//defaut ports and buffer sizes
+// Default ports and buffer sizes
 #define DEFAULT_PORT 8080
 #define MAX_BUFFER_SIZE 4096
 #define MAX_TOPIC_LEN 32
 #define MAX_USERNAME_LEN 32
+#define SOCKET_TIMEOUT_MS 5000  // 5 second socket timeout
+#define MAX_MESSAGE_SIZE (10 * 1024 * 1024)  // 10MB max message size
 
 
 //Message types

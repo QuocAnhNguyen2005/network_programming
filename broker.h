@@ -127,7 +127,21 @@ public:
 
     // Publish a message to all subscribers of a topic
     // Returns number of clients the message was sent to
+    // ===== OPTIMIZATION: Input validation before processing =====
+    // Purpose: Catch malformed requests early, prevent null pointer dereferences
+    // - Check for null/invalid topic, prevents undefined behavior
+    // - Check payload size limit, prevents buffer overflow and DoS attacks
     int publishToTopic(const char* topic, const PacketHeader& header, const char* payload, int payloadLen) {
+        // Validate inputs
+        if (!topic || payloadLen < 0) {
+            std::cerr << "[BROKER] Invalid publish parameters" << std::endl;
+            return 0;
+        }
+        if (payloadLen > MAX_MESSAGE_SIZE) {
+            std::cerr << "[BROKER] Message exceeds maximum size (" << payloadLen << " bytes)" << std::endl;
+            return 0;
+        }
+        
         std::vector<int> subscriberIds;
         
         // Get list of subscribers (under lock)
@@ -195,6 +209,22 @@ public:
             return topicSubscribers[topic];
         }
         return std::vector<int>();
+    }
+
+    // Check if username is already taken by an online client
+    // Returns true if username exists and client is connected
+    bool isUsernameTaken(const char* username) {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        
+        // Iterate through all connected clients
+        for (auto const& pair : clients) {
+            auto const& client = pair.second;
+            // Check if client is connected AND username matches (case-sensitive)
+            if (client && client->isConnected && std::strcmp(client->username, username) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 
