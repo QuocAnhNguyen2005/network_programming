@@ -1,1 +1,13 @@
+# Bỏ qua tất cả các file thực thi Windows
 *.exe
+
+# Bỏ qua các file đối tượng (object files) được tạo ra trong quá trình biên dịch
+*.o
+*.obj
+
+# Bỏ qua các file debug/thư mục build
+# Thường được tạo ra bởi IDE như VS Code, Visual Studio, v.v.
+build/
+bin/
+debug/
+release/
