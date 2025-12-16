@@ -16,9 +16,9 @@
 #include <fstream>
 #include <cstring>
 #include <atomic>
-#include <chrono>       // For std::chrono::milliseconds in sleep_for
+#include <chrono> // For std::chrono::milliseconds in sleep_for
 
-#include "protocol.h" // uses PacketHeader, MessageType, DEFAULT_PORT, etc. :contentReference[oaicite:2]{index=2}
+#include "../protocol.h" // uses PacketHeader, MessageType, DEFAULT_PORT, etc. :contentReference[oaicite:2]{index=2}
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -47,8 +47,9 @@ typedef int socket_t;
 // - Input validation: reject null pointers and invalid sizes
 bool sendAll(socket_t sock, const char *data, int total)
 {
-    if (total <= 0 || !data) return false;
-    
+    if (total <= 0 || !data)
+        return false;
+
     int sent = 0;
     while (sent < total)
     {
@@ -68,13 +69,14 @@ bool sendAll(socket_t sock, const char *data, int total)
 // - Input validation: reject null pointers and invalid sizes
 bool recvAll(socket_t sock, char *buffer, int total)
 {
-    if (total <= 0 || !buffer) return false;
-    
+    if (total <= 0 || !buffer)
+        return false;
+
     int recvd = 0;
     while (recvd < total)
     {
         int n = recv(sock, buffer + recvd, total - recvd, 0);
-        if (n <= 0)  // 0 = connection closed, <0 = error
+        if (n <= 0) // 0 = connection closed, <0 = error
             return false;
         recvd += n;
     }
@@ -90,7 +92,7 @@ void receiverThread(socket_t sock)
     {
         PacketHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         // ===== OPTIMIZATION: Reliable header reception =====
         // Purpose: Guarantee complete packet headers before processing
         // - Headers are fixed 64-byte structures critical for parsing
@@ -99,7 +101,8 @@ void receiverThread(socket_t sock)
         if (!recvAll(sock, (char *)&header, sizeof(PacketHeader)))
         {
             // Only print error if it's not a graceful shutdown (running flag still true)
-            if (running) {
+            if (running)
+            {
                 std::cerr << "\n[RECV] Connection closed or error while reading header.\n";
             }
             running = false;
@@ -111,7 +114,8 @@ void receiverThread(socket_t sock)
         // - Prevents crashes from extremely large payload claims
         // - Protects against DoS attacks with fake size fields
         // - Enforces MAX_MESSAGE_SIZE limit on client side too
-        if (header.payloadLength > MAX_MESSAGE_SIZE) {
+        if (header.payloadLength > MAX_MESSAGE_SIZE)
+        {
             std::cerr << "\n[RECV] Invalid payload size: " << header.payloadLength << "\n";
             running = false;
             break;
@@ -124,12 +128,13 @@ void receiverThread(socket_t sock)
             // Purpose: Prevent stack buffer overflow
             // - MAX_BUFFER_SIZE is 4KB, payloads larger need chunked transfer
             // - Reject single-buffer payloads larger than MAX_BUFFER_SIZE
-            if (header.payloadLength > MAX_BUFFER_SIZE) {
+            if (header.payloadLength > MAX_BUFFER_SIZE)
+            {
                 std::cerr << "\n[RECV] Payload too large: " << header.payloadLength << " bytes\n";
                 running = false;
                 break;
             }
-            
+
             std::vector<char> payload(header.payloadLength + 1);
             // ===== OPTIMIZATION: Reliable payload reception =====
             // Purpose: Ensure complete payload arrives before processing
@@ -137,7 +142,8 @@ void receiverThread(socket_t sock)
             // - recvAll loops until all bytes received
             if (!recvAll(sock, payload.data(), header.payloadLength))
             {
-                if (running) {
+                if (running)
+                {
                     std::cerr << "\n[RECV] Error reading payload.\n";
                 }
                 running = false;
@@ -151,28 +157,35 @@ void receiverThread(socket_t sock)
             // - MSG_PUBLISH_FILE: Show only size, NOT binary data (prevents terminal corruption)
             // - Other types: Generic display with metadata
             // Handle different message types with appropriate display
-            if (header.msgType == MSG_PUBLISH_TEXT) {
+            if (header.msgType == MSG_PUBLISH_TEXT)
+            {
                 // Text messages: display full content
-                std::cout << "\n[MSG from " << header.sender << " in '" << header.topic << "']: " 
+                std::cout << "\n[MSG from " << header.sender << " in '" << header.topic << "']: "
                           << std::string(payload.data(), header.payloadLength) << "\n";
-            } 
-            else if (header.msgType == MSG_PUBLISH_FILE) {
+            }
+            else if (header.msgType == MSG_PUBLISH_FILE)
+            {
                 // File chunks: only notify receipt, don't print binary content
                 // (Binary content would corrupt terminal display)
-                std::cout << "\n[FILE] Received chunk (" << header.payloadLength 
-                          << " bytes) from " << header.sender 
-                          << " in topic '" << header.topic 
+                std::cout << "\n[FILE] Received chunk (" << header.payloadLength
+                          << " bytes) from " << header.sender
+                          << " in topic '" << header.topic
                           << "' (Binary data - not displayed)\n";
             }
-            else {
+            else
+            {
                 // Other message types: show type and size
-                std::cout << "\n[INCOMING] msgType=" << header.msgType 
-                          << " | size=" << header.payloadLength 
+                std::cout << "\n[INCOMING] msgType=" << header.msgType
+                          << " | size=" << header.payloadLength
                           << " bytes | from=" << header.sender << "\n";
             }
-        } else if (header.msgType == MSG_ACK) {
+        }
+        else if (header.msgType == MSG_ACK)
+        {
             std::cout << "\n[ACK] Message ID " << header.messageId << " acknowledged\n";
-        } else if (header.msgType == MSG_ERROR) {
+        }
+        else if (header.msgType == MSG_ERROR)
+        {
             std::cout << "\n[ERROR] Server returned error\n";
         }
         std::cout << "> "; // prompt
@@ -261,7 +274,7 @@ int main(int argc, char **argv)
             // - Matches MAX_USERNAME_LEN limit defined in protocol.h
             if (user.empty() || user.length() >= MAX_USERNAME_LEN)
             {
-                std::cout << "Usage: /login <username> (max " << MAX_USERNAME_LEN-1 << " chars)\n";
+                std::cout << "Usage: /login <username> (max " << MAX_USERNAME_LEN - 1 << " chars)\n";
                 continue;
             }
             std::strncpy(username, user.c_str(), MAX_USERNAME_LEN - 1);
@@ -290,7 +303,7 @@ int main(int argc, char **argv)
             // - Prevents wasting network bandwidth on bad requests
             if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
             {
-                std::cout << "Usage: /subscribe <topic> (max " << MAX_TOPIC_LEN-1 << " chars)\n";
+                std::cout << "Usage: /subscribe <topic> (max " << MAX_TOPIC_LEN - 1 << " chars)\n";
                 continue;
             }
 
@@ -318,7 +331,7 @@ int main(int argc, char **argv)
             // - Reduces unnecessary broker operations for bad input
             if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
             {
-                std::cout << "Usage: /unsubscribe <topic> (max " << MAX_TOPIC_LEN-1 << " chars)\n";
+                std::cout << "Usage: /unsubscribe <topic> (max " << MAX_TOPIC_LEN - 1 << " chars)\n";
                 continue;
             }
 
@@ -357,7 +370,7 @@ int main(int argc, char **argv)
             if (topic.empty() || topic.length() >= MAX_TOPIC_LEN || msg.empty() || msg.length() > MAX_BUFFER_SIZE)
             {
                 std::cout << "Usage: /publish <topic> <message>\n";
-                std::cout << "  Topic max: " << MAX_TOPIC_LEN-1 << " chars, Message max: " << MAX_BUFFER_SIZE << " bytes\n";
+                std::cout << "  Topic max: " << MAX_TOPIC_LEN - 1 << " chars, Message max: " << MAX_BUFFER_SIZE << " bytes\n";
                 continue;
             }
 
@@ -403,7 +416,7 @@ int main(int argc, char **argv)
             // - Prevents creating malformed file transfer requests
             if (topic.empty() || topic.length() >= MAX_TOPIC_LEN)
             {
-                std::cout << "Invalid topic name (max " << MAX_TOPIC_LEN-1 << " chars)\n";
+                std::cout << "Invalid topic name (max " << MAX_TOPIC_LEN - 1 << " chars)\n";
                 continue;
             }
 
@@ -414,7 +427,7 @@ int main(int argc, char **argv)
                 std::cerr << "Cannot open file: " << path << "\n";
                 continue;
             }
-            
+
             // ===== OPTIMIZATION: File size validation before transfer =====
             // Purpose: Prevent attempting to transfer oversized files
             // - Check file size before starting send loop
@@ -424,8 +437,9 @@ int main(int argc, char **argv)
             ifs.seekg(0, std::ios::end);
             size_t fileSize = ifs.tellg();
             ifs.seekg(0, std::ios::beg);
-            
-            if (fileSize > (10 * 1024 * 1024)) {  // 10MB limit
+
+            if (fileSize > (10 * 1024 * 1024))
+            { // 10MB limit
                 std::cerr << "File too large (max 10MB): " << path << "\n";
                 continue;
             }
@@ -438,7 +452,7 @@ int main(int argc, char **argv)
             while (ifs.read(fileBuf, sizeof(fileBuf)) || ifs.gcount() > 0)
             {
                 int bytesRead = (int)ifs.gcount(); // Number of bytes actually read
-                
+
                 // Create packet header for this chunk
                 PacketHeader hdr;
                 std::memset(&hdr, 0, sizeof(hdr));
