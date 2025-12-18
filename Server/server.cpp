@@ -26,14 +26,10 @@
 #define CLOSE_SOCKET(s) close(s) // Use close() on POSIX systems
 #endif
 
+#define STREAM_PORT 8081 // Default port for streaming
+
 // Global message broker instance (shared across all client threads)
 MessageBroker g_broker;
-
-// ===== OPTIMIZATION: Reliable socket operations =====
-// Purpose: Ensure all bytes are transmitted/received, handle partial operations
-// - Standard recv/send can return partial data counts
-// - We loop until all bytes transferred to guarantee message integrity
-// - Critical for binary data like files and structured packet headers
 
 // Receive all bytes reliably
 bool recvAllBytes(SOCKET sock, char *buffer, int totalBytes)
@@ -339,6 +335,92 @@ void handleClient(int clientId, SOCKET clientSocket)
     std::cout << "[THREAD " << clientId << "] Client handler terminated." << std::endl;
 }
 
+void handleStreamClient(int clientId, SOCKET clientSocket)
+{
+    std::cout << "[STREAM " << clientId << "] Stream handler started.\n";
+
+    while (true)
+    {
+        PacketHeader header;
+
+        // Nhận header stream
+        if (!recvAllBytes(clientSocket,
+                          (char *)&header,
+                          sizeof(PacketHeader)))
+        {
+            std::cout << "[STREAM " << clientId << "] Stream client disconnected.\n";
+            break;
+        }
+
+        // Validate payload size
+        if (header.payloadLength > MAX_MESSAGE_SIZE)
+        {
+            std::cerr << "[STREAM " << clientId << "] Invalid payload size\n";
+            break;
+        }
+
+        std::vector<char> payload;
+        if (header.payloadLength > 0)
+        {
+            payload.resize(header.payloadLength);
+            if (!recvAllBytes(clientSocket,
+                              payload.data(),
+                              header.payloadLength))
+            {
+                std::cout << "[STREAM " << clientId << "] Disconnect while receiving payload.\n";
+                break;
+            }
+        }
+
+        switch (header.msgType)
+        {
+        case MSG_STREAM_START:
+            g_broker.registerStreamSession(
+                header.messageId,
+                header.sender,
+                header.topic);
+
+            // Thông báo cho subscriber
+            g_broker.relayStreamFrame(
+                header.topic,
+                header.sender,
+                header,
+                nullptr,
+                0);
+            break;
+
+        case MSG_STREAM_FRAME:
+            if (g_broker.hasStreamSession(header.messageId))
+            {
+                g_broker.relayStreamFrame(
+                    header.topic,
+                    header.sender,
+                    header,
+                    payload.data(),
+                    header.payloadLength);
+            }
+            break;
+
+        case MSG_STREAM_STOP:
+            g_broker.relayStreamFrame(
+                header.topic,
+                header.sender,
+                header,
+                nullptr,
+                0);
+            g_broker.unregisterStreamSession(header.messageId);
+            break;
+
+        default:
+            // Stream handler IGNORE message lạ
+            break;
+        }
+    }
+
+    CLOSE_SOCKET(clientSocket);
+    std::cout << "[STREAM " << clientId << "] Stream handler terminated.\n";
+}
+
 int main()
 {
     // Initialize Winsock on Windows (no-op on POSIX)
@@ -404,6 +486,35 @@ int main()
         return 1;
     }
 
+    SOCKET streamSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (streamSocket == INVALID_SOCKET)
+    {
+        std::cerr << "stream socket() failed\n";
+        return 1;
+    }
+
+    opt = 1;
+    setsockopt(streamSocket, SOL_SOCKET, SO_REUSEADDR,
+               (const char *)&opt, sizeof(opt));
+
+    sockaddr_in streamAddr{};
+    streamAddr.sin_family = AF_INET;
+    streamAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    streamAddr.sin_port = htons(STREAM_PORT);
+
+    if (bind(streamSocket,
+             (sockaddr *)&streamAddr,
+             sizeof(streamAddr)) == SOCKET_ERROR)
+    {
+        std::cerr << "bind stream port failed\n";
+        return 1;
+    }
+
+    listen(streamSocket, SOMAXCONN);
+
+    std::cout << "[MAIN] Stream server listening on port "
+              << STREAM_PORT << std::endl;
+
     std::cout << "[MAIN] Server listening on port " << DEFAULT_PORT << std::endl;
     std::cout << "[MAIN] Waiting for clients..." << std::endl;
 
@@ -413,41 +524,94 @@ int main()
     // Multi-client accept loop
     int clientIdCounter = 0;
 
+    std::thread chatAcceptThread([&]()
+                                 {
     while (true)
     {
-        // Accept incoming connection
+        // Accept incoming CHAT connection
         struct sockaddr_in clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
 
-        SOCKET clientSock = accept(serverSocket, (struct sockaddr *)&clientAddr, &clientLen);
+        SOCKET clientSock = accept(serverSocket,
+                                   (struct sockaddr *)&clientAddr,
+                                   &clientLen);
 
         if (clientSock == INVALID_SOCKET)
         {
 #ifdef _WIN32
-            std::cerr << "[MAIN] accept() failed: " << WSAGetLastError() << std::endl;
+            std::cerr << "[CHAT] accept() failed: "
+                      << WSAGetLastError() << std::endl;
 #else
-            std::cerr << "[MAIN] accept() failed: " << strerror(errno) << std::endl;
+            std::cerr << "[CHAT] accept() failed: "
+                      << strerror(errno) << std::endl;
 #endif
-            continue; // Try accepting next connection
+            continue;
         }
 
-        // New client connected
         int clientId = clientIdCounter++;
-        std::cout << "[MAIN] *** New client connected: ID=" << clientId
+
+        std::cout << "[CHAT] *** New client connected: ID=" << clientId
                   << ", IP=" << inet_ntoa(clientAddr.sin_addr)
                   << ":" << ntohs(clientAddr.sin_port) << std::endl;
-        std::cout << "[MAIN] Total online clients: " << (g_broker.getOnlineClientCount() + 1) << std::endl;
 
-        // Create a thread to handle this client
-        // Use std::thread to spawn handleClient in background
-        clientThreads.push_back(std::thread(handleClient, clientId, clientSock));
+        std::cout << "[CHAT] Total online clients: "
+                  << (g_broker.getOnlineClientCount() + 1)
+                  << std::endl;
 
-        // Detach thread so it runs independently (server won't wait for it to finish)
+        clientThreads.push_back(
+            std::thread(handleClient, clientId, clientSock)
+        );
+
         clientThreads.back().detach();
-    }
+    } });
+
+    std::thread streamAcceptThread([&]()
+                                   {
+    while (true)
+    {
+        // Accept incoming STREAM connection
+        struct sockaddr_in clientAddr;
+        socklen_t clientLen = sizeof(clientAddr);
+
+        SOCKET streamSock = accept(streamSocket,
+                                   (struct sockaddr *)&clientAddr,
+                                   &clientLen);
+
+        if (streamSock == INVALID_SOCKET)
+        {
+#ifdef _WIN32
+            std::cerr << "[STREAM] accept() failed: "
+                      << WSAGetLastError() << std::endl;
+#else
+            std::cerr << "[STREAM] accept() failed: "
+                      << strerror(errno) << std::endl;
+#endif
+            continue;
+        }
+
+        int streamClientId = clientIdCounter++;
+
+        std::cout << "[STREAM] *** New stream client connected: ID="
+                  << streamClientId
+                  << ", IP=" << inet_ntoa(clientAddr.sin_addr)
+                  << ":" << ntohs(clientAddr.sin_port)
+                  << std::endl;
+
+        clientThreads.push_back(
+            std::thread(handleStreamClient,
+                        streamClientId,
+                        streamSock)
+        );
+
+        clientThreads.back().detach();
+    } });
+
+    chatAcceptThread.join();
+    streamAcceptThread.join();
 
     // Cleanup (unreachable in normal flow, but good practice)
     CLOSE_SOCKET(serverSocket);
+    CLOSE_SOCKET(streamSocket);
 
 #ifdef _WIN32
     WSACleanup();

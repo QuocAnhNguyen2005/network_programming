@@ -19,6 +19,14 @@
 #define CLOSE_SOCKET(s) close(s)
 #endif
 
+struct StreamSession
+{
+    uint32_t sessionId;
+    std::string topic;
+    std::string publisher;
+    bool active;
+};
+
 // Struct to hold client information
 struct ClientInfo
 {
@@ -43,6 +51,8 @@ private:
     std::mutex clientsMutex;                                  // Protect clients map
     std::mutex topicsMutex;                                   // Protect topics map
     int nextClientId;                                         // Auto-increment client ID
+    std::map<uint32_t, StreamSession> streamSessions;
+    std::mutex streamMutex;
 
 public:
     MessageBroker() : nextClientId(0) {}
@@ -260,6 +270,75 @@ public:
             }
         }
         return false;
+    }
+
+    void registerStreamSession(uint32_t sessionId,
+                               const char *publisher,
+                               const char *topic)
+    {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        streamSessions[sessionId] = {
+            sessionId,
+            topic,
+            publisher,
+            true};
+    }
+
+    void unregisterStreamSession(uint32_t sessionId)
+    {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        streamSessions.erase(sessionId);
+    }
+
+    bool hasStreamSession(uint32_t sessionId)
+    {
+        std::lock_guard<std::mutex> lock(streamMutex);
+        return streamSessions.count(sessionId) > 0;
+    }
+
+    void relayStreamFrame(const char *topic,
+                          const char *sender,
+                          const PacketHeader &header,
+                          const char *payload,
+                          int payloadLen)
+    {
+        std::vector<int> subscribers;
+
+        {
+            std::lock_guard<std::mutex> lock(topicsMutex);
+            if (topicSubscribers.count(topic))
+                subscribers = topicSubscribers[topic];
+        }
+
+        for (int clientId : subscribers)
+        {
+            std::shared_ptr<ClientInfo> client;
+            {
+                std::lock_guard<std::mutex> lock(clientsMutex);
+                if (clients.count(clientId))
+                    client = clients[clientId];
+            }
+
+            if (!client || !client->isConnected)
+                continue;
+
+            // Không gửi lại cho chính sender
+            if (std::strcmp(client->username, sender) == 0)
+                continue;
+
+            send(client->socket,
+                 (const char *)&header,
+                 sizeof(PacketHeader),
+                 0);
+
+            if (payloadLen > 0)
+            {
+                send(client->socket,
+                     payload,
+                     payloadLen,
+                     0);
+            }
+        }
     }
 };
 

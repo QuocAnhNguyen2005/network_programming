@@ -5,6 +5,18 @@
 #include <QDateTime>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QAudioFormat>
+#include <QMediaDevices>
+#include <QAudioDevice>
+
+static QAudioFormat createAudioFormat()
+{
+    QAudioFormat format;
+    format.setSampleRate(8000);
+    format.setChannelCount(1);
+    format.setSampleFormat(QAudioFormat::Int16);
+    return format;
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), socket(new QTcpSocket(this))
@@ -25,6 +37,15 @@ MainWindow::MainWindow(QWidget *parent)
     ui->btnDisconnect->setEnabled(false);
     ui->groupBoxChat->setEnabled(false);
     ui->groupTopic->setEnabled(false);
+
+    streamSocket = new QTcpSocket(this);
+
+    connect(streamSocket, &QTcpSocket::connected,
+            this, &MainWindow::onStreamConnected);
+    connect(streamSocket, &QTcpSocket::readyRead,
+            this, &MainWindow::onStreamReadyRead);
+    connect(streamSocket, &QTcpSocket::disconnected,
+            this, &MainWindow::onStreamDisconnected);
 }
 
 MainWindow::~MainWindow()
@@ -247,6 +268,7 @@ void MainWindow::on_btnSend_clicked()
 void MainWindow::onTopicChanged(const QString &topic)
 {
     ui->listMessage->clear();
+    ui->listMessage->addItem("Chat messages for topic: " + topic);
 
     if (!topicMessages.contains(topic))
         return;
@@ -293,4 +315,202 @@ void MainWindow::logMessage(const QString &msg)
     QString time = QDateTime::currentDateTime().toString("HH:mm:ss");
     ui->listWidgetLog->addItem("[" + time + "] " + msg);
     ui->listWidgetLog->scrollToBottom();
+}
+
+void MainWindow::sendStreamPacket(MessageType type,
+                                  const QString &topic,
+                                  const QByteArray &payload,
+                                  uint32_t sessionId,
+                                  uint8_t flags)
+{
+    if (streamSocket->state() != QAbstractSocket::ConnectedState)
+        return;
+
+    PacketHeader header;
+    memset(&header, 0, sizeof(PacketHeader));
+
+    header.msgType = type;
+    header.messageId = sessionId;
+    header.payloadLength = payload.size();
+    header.timestamp = QDateTime::currentMSecsSinceEpoch();
+    header.flags = flags;
+
+    strncpy(header.sender,
+            currentUsername.toUtf8().constData(),
+            MAX_USERNAME_LEN - 1);
+
+    strncpy(header.topic,
+            topic.toUtf8().constData(),
+            MAX_TOPIC_LEN - 1);
+
+    streamSocket->write((char *)&header, sizeof(PacketHeader));
+    if (!payload.isEmpty())
+        streamSocket->write(payload);
+
+    streamSocket->flush();
+}
+
+void MainWindow::onStreamReadyRead()
+{
+    static int frameCounter = 0;
+    frameCounter++;
+
+    if (frameCounter % 25 == 0)
+    {
+        ui->listAudio->addItem("[AUDIO] Receiving audio...");
+    }
+
+    while (streamSocket->bytesAvailable() >= (qint64)sizeof(PacketHeader))
+    {
+        PacketHeader header;
+        streamSocket->peek((char *)&header, sizeof(PacketHeader));
+
+        if (streamSocket->bytesAvailable() <
+            sizeof(PacketHeader) + header.payloadLength)
+            return;
+
+        streamSocket->read((char *)&header, sizeof(PacketHeader));
+        if (QString(header.sender) == currentUsername)
+        {
+            // Bỏ frame của chính mình
+            continue;
+        }
+
+        QByteArray payload;
+        if (header.payloadLength > 0)
+            payload = streamSocket->read(header.payloadLength);
+
+        if (header.msgType == MSG_STREAM_FRAME)
+        {
+            // ===== Setup AUDIO OUTPUT nếu chưa có =====
+            if (!audioOutputReady)
+            {
+                if (!audioSink)
+                {
+                    QAudioDevice outputDevice = QMediaDevices::defaultAudioOutput();
+                    QAudioFormat format = createAudioFormat();
+
+                    audioSink = new QAudioSink(outputDevice, format, this);
+                    audioOutDevice = audioSink->start();
+                }
+                audioOutputReady = true;
+            }
+
+            audioOutDevice->write(payload);
+        }
+        else if (header.msgType == MSG_STREAM_STOP)
+        {
+            if (audioSink)
+            {
+                audioSink->stop();
+                delete audioSink;
+                audioSink = nullptr;
+            }
+        }
+    }
+}
+
+void MainWindow::startAudioStream(const QString &topic)
+{
+    if (isStreaming)
+        return;
+
+    streamSessionId =
+        static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch());
+
+    // Gửi STREAM_START
+    sendStreamPacket(MSG_STREAM_START,
+                     topic,
+                     QByteArray(),
+                     streamSessionId,
+                     0);
+
+    // ===== Setup AUDIO INPUT =====
+    QAudioDevice inputDevice = QMediaDevices::defaultAudioInput();
+    QAudioFormat format = createAudioFormat();
+
+    audioSource = new QAudioSource(inputDevice, format, this);
+    audioInDevice = audioSource->start();
+
+    connect(audioInDevice, &QIODevice::readyRead, this, [this]()
+            {
+        QByteArray data = audioInDevice->read(320);
+        if (!data.isEmpty())
+            sendAudioFrame(data); });
+
+    isStreaming = true;
+
+    ui->listAudio->addItem("[AUDIO] Streaming started");
+}
+
+void MainWindow::sendAudioFrame(const QByteArray &data)
+{
+    if (!streamSocket ||
+        streamSocket->state() != QAbstractSocket::ConnectedState)
+    {
+        return;
+    }
+
+    sendStreamPacket(MSG_STREAM_FRAME,
+                     ui->txtTopicPub->currentText(),
+                     data,
+                     streamSessionId,
+                     0);
+}
+
+void MainWindow::stopAudioStream()
+{
+    if (!isStreaming)
+        return;
+
+    sendStreamPacket(MSG_STREAM_STOP,
+                     ui->txtTopicPub->currentText(),
+                     QByteArray(),
+                     streamSessionId,
+                     0);
+
+    if (audioSource)
+    {
+        audioSource->stop();
+        delete audioSource;
+        audioSource = nullptr;
+    }
+
+    if (audioSink)
+    {
+        audioSink->stop();
+        delete audioSink;
+        audioSink = nullptr;
+    }
+
+    isStreaming = false;
+    ui->listAudio->addItem("[AUDIO] Streaming stopped");
+    audioOutputReady = false;
+}
+
+void MainWindow::onStreamDisconnected()
+{
+    if (audioSource)
+    {
+        audioSource->stop();
+        delete audioSource;
+        audioSource = nullptr;
+    }
+
+    if (audioSink)
+    {
+        audioSink->stop();
+        delete audioSink;
+        audioSink = nullptr;
+    }
+
+    audioOutputReady = false;
+    isStreaming = false;
+
+    ui->listAudio->addItem("[AUDIO] Stream disconnected");
+}
+
+void MainWindow::onStreamConnected()
+{
+    logMessage("Đã kết nối Stream thành công!");
 }

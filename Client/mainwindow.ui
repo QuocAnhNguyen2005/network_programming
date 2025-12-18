@@ -67,7 +67,7 @@
           <property name="title">
            <string>Connect Server </string>
           </property>
-          <widget class="QWidget" name="">
+          <widget class="QWidget" name="layoutWidget">
            <property name="geometry">
             <rect>
              <x>20</x>
@@ -206,7 +206,7 @@
              <property name="title">
               <string>Subscribe Topic</string>
              </property>
-             <widget class="QWidget" name="">
+             <widget class="QWidget" name="layoutWidget">
               <property name="geometry">
                <rect>
                 <x>21</x>
@@ -294,7 +294,7 @@
           <property name="title">
            <string>Publisher </string>
           </property>
-          <widget class="QWidget" name="">
+          <widget class="QWidget" name="layoutWidget">
            <property name="geometry">
             <rect>
              <x>20</x>
@@ -304,9 +304,6 @@
             </rect>
            </property>
            <layout class="QGridLayout" name="gridLayout_3">
-            <item row="0" column="0" rowspan="5">
-             <widget class="QListWidget" name="listMessage"/>
-            </item>
             <item row="0" column="1">
              <widget class="QLabel" name="label_5">
               <property name="sizePolicy">
@@ -370,6 +367,31 @@
               <property name="text">
                <string>Send</string>
               </property>
+             </widget>
+            </item>
+            <item row="1" column="2">
+             <widget class="QPushButton" name="btnCall">
+              <property name="text">
+               <string>Call</string>
+              </property>
+             </widget>
+            </item>
+            <item row="0" column="0" rowspan="3">
+             <widget class="QListWidget" name="listMessage">
+              <item>
+               <property name="text">
+                <string>Chat messages</string>
+               </property>
+              </item>
+             </widget>
+            </item>
+            <item row="3" column="0" rowspan="2">
+             <widget class="QListWidget" name="listAudio">
+              <item>
+               <property name="text">
+                <string>Audio Call</string>
+               </property>
+              </item>
              </widget>
             </item>
            </layout>
