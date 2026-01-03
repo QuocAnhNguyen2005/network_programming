@@ -4,12 +4,11 @@
 #include <QMainWindow>
 #include <QTcpSocket>
 #include <QAbstractSocket>
+#include <QListWidget>
 #include "../protocol.h"
-#include <QAudioSource>
-#include <QAudioSink>
-#include <QMediaDevices>
-#include <QAudioFormat>
-#include <QIODevice>
+#include <QMap>
+#include <QString>
+#include <QStringList>
 
 QT_BEGIN_NAMESPACE
 namespace Ui
@@ -17,6 +16,19 @@ namespace Ui
     class MainWindow;
 }
 QT_END_NAMESPACE
+
+class AudioDialog;
+
+// Structure to store message data
+struct MessageData {
+    enum Type { TEXT, FILE, AUDIO };
+    Type type;
+    QString sender;
+    QString topic;
+    QString content;  // Text content or file name
+    QByteArray data;  // File or audio data
+    qint64 timestamp;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -33,6 +45,8 @@ private slots:
     void on_btnUnsubscribe_clicked();
     void on_btnSend_clicked();
     void on_btnBrowseFile_clicked();
+    void on_btnAudio_clicked();
+    void on_messageListItemClicked(QListWidgetItem *item);
 
     void onSocketConnected();
     void onSocketReadyRead();
@@ -40,38 +54,23 @@ private slots:
     void onSocketError(QAbstractSocket::SocketError socketError);
     void onTopicChanged(const QString &topic);
 
-private slots:
     void onStreamConnected();
-    void onStreamReadyRead();
     void onStreamDisconnected();
-    void startAudioStream(const QString &topic);
-    void stopAudioStream();
-    void sendAudioFrame(const QByteArray &data);
 
 private:
     Ui::MainWindow *ui;
     QTcpSocket *socket;
     QTcpSocket *streamSocket;
-
-    // ===== AUDIO STREAM =====
-    QAudioSource *audioSource = nullptr;
-    QAudioSink *audioSink = nullptr;
-
-    QIODevice *audioInDevice = nullptr;
-    QIODevice *audioOutDevice = nullptr;
-
-    bool isStreaming = false;
-    uint32_t streamSessionId = 0;
-    bool audioOutputReady = false;
+    AudioDialog *audioDialog;
 
     QString currentUsername;
     QMap<QString, QStringList> topicMessages;
+    QMap<QString, QList<MessageData>> messageDataStore; // Store actual message data
 
     void sendPacket(MessageType type, const QString &topic, const QByteArray &payload);
-    void sendStreamPacket(MessageType type, const QString &topic, const QByteArray &payload,
-                          uint32_t sessionId,
-                          uint8_t flags);
-
     void logMessage(const QString &msg);
+    void addMessageToHistory(const MessageData &msgData);
+    void replayAudio(const QByteArray &audioData);
+    void downloadFile(const QString &filename, const QByteArray &fileData);
 };
 #endif
