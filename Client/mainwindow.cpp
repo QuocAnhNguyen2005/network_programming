@@ -1,11 +1,14 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "audiodialog.h"
+#include "audioplayerdialog.h"
+#include "audiotestdialog.h"
 
 #include <QMessageBox>
 #include <QDateTime>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDebug>
 #include <QDir>
 
 MainWindow::MainWindow(QWidget *parent)
@@ -224,23 +227,77 @@ void MainWindow::onSocketReadyRead()
             msgData.timestamp = QDateTime::currentMSecsSinceEpoch();
 
             addMessageToHistory(msgData);
-            logMessage("[FILE] Received file from " + sender + " (" + 
-                      QString::number(payload.size()) + " bytes) - Double-click to download");
+            logMessage("[FILE] Received file from " + sender + " (" +
+                       QString::number(payload.size()) + " bytes) - Double-click to download");
+            break;
+        }
+
+        case MSG_STREAM_START:
+        {
+            QString streamKey = sender + ":" + topic;
+            audioFrameBuffers[streamKey].clear();
+            audioStreamActive[streamKey] = true;
+            audioQualityMap[streamKey] = header.flags; // Store quality from flags field
+            logMessage("[AUDIO] Stream started from " + sender + " on topic " + topic +
+                       " (Quality: " + QString::number(header.flags) + ")");
             break;
         }
 
         case MSG_STREAM_FRAME:
         {
-            // Store audio frames for replay
-            MessageData msgData;
-            msgData.type = MessageData::AUDIO;
-            msgData.sender = sender;
-            msgData.topic = topic;
-            msgData.content = QString("Audio frame");
-            msgData.data = payload;
-            msgData.timestamp = QDateTime::currentMSecsSinceEpoch();
+            // Accumulate audio frames
+            QString streamKey = sender + ":" + topic;
+            if (audioStreamActive.value(streamKey, false))
+            {
+                audioFrameBuffers[streamKey].append(payload);
+                logMessage("[AUDIO] Received frame from " + sender + " (" +
+                           QString::number(payload.size()) + " bytes, total: " +
+                           QString::number(audioFrameBuffers[streamKey].size()) + " bytes)");
+            }
+            break;
+        }
 
-            addMessageToHistory(msgData);
+        case MSG_STREAM_STOP:
+        {
+            // Audio stream finished - save complete audio
+            QString streamKey = sender + ":" + topic;
+            if (audioStreamActive.value(streamKey, false))
+            {
+                audioStreamActive[streamKey] = false;
+                QByteArray completeAudio = audioFrameBuffers[streamKey];
+
+                if (!completeAudio.isEmpty())
+                {
+                    int quality = audioQualityMap.value(streamKey, 1); // Default to medium
+                    qDebug() << "[MainWindow] Complete audio from" << sender << "- Size:" << completeAudio.size()
+                             << "bytes, Quality:" << quality;
+                    logMessage("[AUDIO] Stream finished from " + sender +
+                               " (Total: " + QString::number(completeAudio.size()) + " bytes, Quality: " +
+                               QString::number(quality) + ")");
+
+                    // Verify audio data
+                    if (completeAudio.size() < 100)
+                    {
+                        qDebug() << "[MainWindow] WARNING: Audio data very small (" << completeAudio.size() << "bytes)";
+                    }
+
+                    // Store as complete audio message
+                    MessageData msgData;
+                    msgData.type = MessageData::AUDIO;
+                    msgData.sender = sender;
+                    msgData.topic = topic;
+                    msgData.content = "Audio from " + sender;
+                    msgData.data = completeAudio;
+                    msgData.timestamp = QDateTime::currentMSecsSinceEpoch();
+                    msgData.audioQuality = quality;
+
+                    addMessageToHistory(msgData);
+                }
+
+                // Clear buffer and quality for next stream
+                audioFrameBuffers.remove(streamKey);
+                audioQualityMap.remove(streamKey);
+            }
             break;
         }
 
@@ -373,6 +430,12 @@ void MainWindow::on_btnAudio_clicked()
     audioDialog->exec();
 }
 
+void MainWindow::on_btnTestAudio_clicked()
+{
+    AudioTestDialog testDialog(this);
+    testDialog.exec();
+}
+
 void MainWindow::onStreamConnected()
 {
     logMessage("Stream connection established!");
@@ -398,7 +461,7 @@ void MainWindow::addMessageToHistory(const MessageData &msgData)
     // Create display text
     QString displayText;
     QIcon icon;
-    
+
     switch (msgData.type)
     {
     case MessageData::TEXT:
@@ -407,14 +470,14 @@ void MainWindow::addMessageToHistory(const MessageData &msgData)
                           .arg(msgData.sender)
                           .arg(msgData.content);
         break;
-    
+
     case MessageData::FILE:
         displayText = QString("📁 [%1] %2 sent file (%3 bytes) - Double-click to download")
                           .arg(msgData.topic)
                           .arg(msgData.sender)
                           .arg(msgData.data.size());
         break;
-    
+
     case MessageData::AUDIO:
         displayText = QString("🔊 [%1] Audio from %2 (%3 bytes) - Double-click to play")
                           .arg(msgData.topic)
@@ -442,12 +505,12 @@ void MainWindow::on_messageListItemClicked(QListWidgetItem *item)
         return;
 
     const QList<MessageData> &messages = messageDataStore[currentTopic];
-    
+
     // Match by finding the message in the list
     for (int i = 0; i < messages.size(); i++)
     {
         const MessageData &msg = messages[i];
-        
+
         if (msg.type == MessageData::FILE && text.contains(msg.sender) && text.contains("file"))
         {
             downloadFile(msg.content, msg.data);
@@ -455,7 +518,7 @@ void MainWindow::on_messageListItemClicked(QListWidgetItem *item)
         }
         else if (msg.type == MessageData::AUDIO && text.contains(msg.sender) && text.contains("Audio"))
         {
-            replayAudio(msg.data);
+            replayAudio(msg.data, msg.audioQuality);
             return;
         }
     }
@@ -467,8 +530,7 @@ void MainWindow::downloadFile(const QString &filename, const QByteArray &fileDat
         this,
         "Save File",
         QDir::homePath() + "/" + filename,
-        "All Files (*.*)"
-    );
+        "All Files (*.*)");
 
     if (!savePath.isEmpty())
     {
@@ -477,8 +539,8 @@ void MainWindow::downloadFile(const QString &filename, const QByteArray &fileDat
         {
             file.write(fileData);
             file.close();
-            QMessageBox::information(this, "Success", 
-                "File saved to: " + savePath);
+            QMessageBox::information(this, "Success",
+                                     "File saved to: " + savePath);
             logMessage("[DOWNLOAD] File saved: " + savePath);
         }
         else
@@ -488,7 +550,7 @@ void MainWindow::downloadFile(const QString &filename, const QByteArray &fileDat
     }
 }
 
-void MainWindow::replayAudio(const QByteArray &audioData)
+void MainWindow::replayAudio(const QByteArray &audioData, int quality)
 {
     if (audioData.isEmpty())
     {
@@ -496,24 +558,11 @@ void MainWindow::replayAudio(const QByteArray &audioData)
         return;
     }
 
-    // Create temporary audio dialog for playback
-    if (!audioDialog)
-    {
-        audioDialog = new AudioDialog(socket, currentUsername, this);
-        audioDialog->setStreamSocket(streamSocket);
-        
-        // Ensure stream socket is connected
-        if (streamSocket->state() != QAbstractSocket::ConnectedState)
-        {
-            QString host = ui->txtHost->text();
-            streamSocket->connectToHost(host, 8081);
-        }
-    }
+    logMessage("[AUDIO] Opening audio player for " + QString::number(audioData.size()) +
+               " bytes (Quality: " + QString::number(quality) + ")");
 
-    logMessage("[AUDIO] Replaying audio (" + QString::number(audioData.size()) + " bytes)");
-    
-    // For now, just show info - full playback would need audio sink setup
-    QMessageBox::information(this, "Audio Replay",
-        "Audio data: " + QString::number(audioData.size()) + " bytes\n"
-        "Use Audio dialog for full playback functionality.");
+    // Create and show audio player dialog with quality
+    AudioPlayerDialog *playerDialog = new AudioPlayerDialog(audioData, quality, this);
+    playerDialog->setAttribute(Qt::WA_DeleteOnClose);
+    playerDialog->show();
 }

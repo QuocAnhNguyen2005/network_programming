@@ -151,12 +151,25 @@ void handleStreamClient(int clientId, SOCKET streamSocket)
             }
         }
 
-        // Relay audio frames to all subscribers of the topic
-        if (header->msgType == MSG_STREAM_FRAME && strlen(header->topic) > 0)
+        // Relay stream messages to all subscribers of the topic
+        if (strlen(header->topic) > 0)
         {
-            int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
-            // Suppress log spam for frame relay (commented out)
-            // logMessage("[STREAM] Relayed frame to " + std::to_string(sentCount) + " subscribers");
+            if (header->msgType == MSG_STREAM_START)
+            {
+                logMessage("[STREAM] Stream start from " + std::string(header->sender) + " on topic " + std::string(header->topic));
+                g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+            }
+            else if (header->msgType == MSG_STREAM_FRAME)
+            {
+                int sentCount = g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+                // Suppress log spam for frame relay (commented out)
+                // logMessage("[STREAM] Relayed frame to " + std::to_string(sentCount) + " subscribers");
+            }
+            else if (header->msgType == MSG_STREAM_STOP)
+            {
+                logMessage("[STREAM] Stream stop from " + std::string(header->sender) + " on topic " + std::string(header->topic));
+                g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+            }
         }
     }
 
@@ -321,11 +334,33 @@ void handleClient(int clientId, SOCKET clientSocket)
             break;
         }
 
+        case MSG_STREAM_START:
+        {
+            // Forward audio stream start to subscribers
+            if (strlen(header->topic) > 0)
+            {
+                logMessage("[STREAM] Stream start from " + std::string(header->sender) + " on topic " + std::string(header->topic));
+                g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+            }
+            break;
+        }
+
         case MSG_STREAM_FRAME:
         {
             // Forward audio frame to subscribers
             if (strlen(header->topic) > 0)
             {
+                g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
+            }
+            break;
+        }
+
+        case MSG_STREAM_STOP:
+        {
+            // Forward audio stream stop to subscribers
+            if (strlen(header->topic) > 0)
+            {
+                logMessage("[STREAM] Stream stop from " + std::string(header->sender) + " on topic " + std::string(header->topic));
                 g_broker.publishToTopic(header->topic, *header, payloadBuffer, header->payloadLength);
             }
             break;

@@ -376,20 +376,18 @@
               </property>
              </widget>
             </item>
-            <item row="0" column="0" rowspan="3">
+            <item row="1" column="3">
+             <widget class="QPushButton" name="btnTestAudio">
+              <property name="text">
+               <string>Test Audio</string>
+              </property>
+             </widget>
+            </item>
+            <item row="0" column="0" rowspan="5">
              <widget class="QListWidget" name="listMessage">
               <item>
                <property name="text">
                 <string>Chat messages</string>
-               </property>
-              </item>
-             </widget>
-            </item>
-            <item row="3" column="0" rowspan="2">
-             <widget class="QListWidget" name="listAudio">
-              <item>
-               <property name="text">
-                <string>Audio Call</string>
                </property>
               </item>
              </widget>

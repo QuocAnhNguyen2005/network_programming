@@ -206,9 +206,10 @@ void AudioDialog::startAudioCapture()
         lblStatus->setText("Status: Recording...");
         logAudio("[AUDIO] Recording started - Quality: " + cmbAudioQuality->currentText());
 
-        // Send STREAM_START packet
+        // Send STREAM_START packet with quality in flags field
         streamSessionId = static_cast<uint32_t>(QDateTime::currentMSecsSinceEpoch());
-        sendStreamPacket(MSG_STREAM_START, currentTopic, QByteArray());
+        int quality = cmbAudioQuality->currentData().toInt();
+        sendStreamPacket(MSG_STREAM_START, currentTopic, QByteArray(), quality);
     }
     else
     {
