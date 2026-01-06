@@ -302,15 +302,15 @@ Error: Payload too large (>10MB)
 
 ```cmd
 REM Terminal 1 - Server
-cd d:\Download\Learn\LaptrinhMang\network_programming\Server
+cd ..\LaptrinhMang\network_programming\Server
 server.exe
 
 REM Terminal 2 - Client 1
-cd d:\Download\Learn\LaptrinhMang\network_programming\Client\build
+cd ..\LaptrinhMang\network_programming\Client\build
 untitled.exe
 
 REM Terminal 3 - Client 2
-cd d:\Download\Learn\LaptrinhMang\network_programming\Client\build
+cd ..\LaptrinhMang\network_programming\Client\build
 untitled.exe
 ```
 
