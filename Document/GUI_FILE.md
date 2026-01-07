@@ -85,6 +85,7 @@ Payload: "photo.jpg"
 ```
 
 Receiver nhận được và chuẩn bị nhận file:
+
 - Tạo buffer để lưu data
 - Mở file để ghi (ví dụ: `received_photo.jpg`)
 
@@ -145,7 +146,7 @@ Receiver nhận từng chunk và ghi vào file:
 while (receiving chunks) {
     chunk = receive_chunk();
     write_to_file(chunk.payload);
-    
+
     if (chunk.flags & FLAG_LAST_CHUNK) {
         close_file();
         show_notification("File received!");
@@ -165,31 +166,31 @@ void MainWindow::sendFile()
     QString filePath = QFileDialog::getOpenFileName(
         this, "Select File", "", "All Files (*.*)"
     );
-    
+
     if (filePath.isEmpty()) return;
-    
+
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly)) {
         QMessageBox::critical(this, "Error", "Cannot open file");
         return;
     }
-    
+
     // 2. Lấy thông tin file
     QFileInfo fileInfo(filePath);
     QString filename = fileInfo.fileName();
     qint64 fileSize = file.size();
-    
+
     // 3. Kiểm tra kích thước
     if (fileSize > MAX_MESSAGE_SIZE) {
         QMessageBox::critical(this, "Error", "File too large (max 10MB)");
         return;
     }
-    
+
     // 4. Hỏi topic/recipient
     QString topic = QInputDialog::getText(
         this, "Send To", "Enter topic or username:"
     );
-    
+
     // 5. Gửi MSG_PUBLISH_FILE
     PacketHeader header;
     memset(&header, 0, sizeof(header));
@@ -199,17 +200,17 @@ void MainWindow::sendFile()
     strcpy(header.topic, topic.toStdString().c_str());
     header.messageId = generateMessageId();
     header.timestamp = getCurrentTimestamp();
-    
+
     sendPacket(header, filename.toStdString().c_str());
-    
+
     // 6. Gửi file data theo chunks
     const int CHUNK_SIZE = 4096;
     char buffer[CHUNK_SIZE];
     qint64 totalSent = 0;
-    
+
     while (!file.atEnd()) {
         qint64 bytesRead = file.read(buffer, CHUNK_SIZE);
-        
+
         PacketHeader dataHeader;
         memset(&dataHeader, 0, sizeof(dataHeader));
         dataHeader.msgType = MSG_FILE_DATA;
@@ -217,21 +218,21 @@ void MainWindow::sendFile()
         strcpy(dataHeader.sender, m_username.toStdString().c_str());
         strcpy(dataHeader.topic, topic.toStdString().c_str());
         dataHeader.messageId = generateMessageId();
-        
+
         // Đánh dấu chunk cuối
         if (file.atEnd()) {
             dataHeader.flags = 0x01;  // FLAG_LAST_CHUNK
         }
-        
+
         sendPacket(dataHeader, buffer);
-        
+
         totalSent += bytesRead;
-        
+
         // Update progress bar
         int progress = (totalSent * 100) / fileSize;
         m_progressBar->setValue(progress);
     }
-    
+
     file.close();
     QMessageBox::information(this, "Success", "File sent!");
 }
@@ -246,12 +247,12 @@ void MainWindow::handleIncomingPacket(const PacketHeader& header, const char* pa
         // Nhận thông báo file mới
         QString filename(payload);
         QString sender(header.sender);
-        
+
         // Hiển thị thông báo
         m_chatDisplay->append(
             QString("[FILE] %1 is sending: %2").arg(sender).arg(filename)
         );
-        
+
         // Chuẩn bị nhận file
         QString savePath = "received_" + filename;
         m_currentFile = new QFile(savePath);
@@ -261,32 +262,32 @@ void MainWindow::handleIncomingPacket(const PacketHeader& header, const char* pa
             m_currentFile = nullptr;
             return;
         }
-        
+
         m_receivingFile = true;
         m_currentFilename = filename;
-        
+
     } else if (header.msgType == MSG_FILE_DATA) {
         // Nhận chunk data
         if (!m_receivingFile || !m_currentFile) {
             return;
         }
-        
+
         // Ghi data vào file
         m_currentFile->write(payload, header.payloadLength);
-        
+
         // Kiểm tra chunk cuối
         if (header.flags & 0x01) {  // FLAG_LAST_CHUNK
             m_currentFile->close();
             delete m_currentFile;
             m_currentFile = nullptr;
             m_receivingFile = false;
-            
+
             // Thông báo hoàn thành
             m_chatDisplay->append(
                 QString("[FILE] Received: %1").arg(m_currentFilename)
             );
             QMessageBox::information(
-                this, "File Received", 
+                this, "File Received",
                 QString("File saved as: received_%1").arg(m_currentFilename)
             );
         }
@@ -303,18 +304,18 @@ void handlePublishFile(ClientInfo* client, const PacketHeader& header, const cha
 {
     std::string filename(payload, header.payloadLength);
     std::string topic(header.topic);
-    
+
     logMessage(
-        "File transfer initiated: " + std::string(header.sender) + 
+        "File transfer initiated: " + std::string(header.sender) +
         " sending '" + filename + "' to topic '" + topic + "'"
     );
-    
+
     // Forward đến subscribers
     auto subscribers = g_broker.getSubscribers(topic);
     for (SOCKET subscriberSock : subscribers) {
         sendPacket(subscriberSock, header, payload);
     }
-    
+
     // Lưu trạng thái file transfer
     client->sendingFile = true;
     client->currentFilename = filename;
@@ -328,13 +329,13 @@ void handlePublishFile(ClientInfo* client, const PacketHeader& header, const cha
 void handleFileData(ClientInfo* client, const PacketHeader& header, const char* payload)
 {
     std::string topic(header.topic);
-    
+
     // Forward chunk đến subscribers
     auto subscribers = g_broker.getSubscribers(topic);
     for (SOCKET subscriberSock : subscribers) {
         sendPacket(subscriberSock, header, payload);
     }
-    
+
     // Kiểm tra chunk cuối
     if (header.flags & 0x01) {  // FLAG_LAST_CHUNK
         logMessage(
@@ -433,6 +434,7 @@ Payload: <binary file data>
 ### Lỗi thường gặp
 
 1. **File quá lớn**
+
 ```cpp
 if (fileSize > MAX_MESSAGE_SIZE) {
     sendErrorPacket(sock, messageId, "File exceeds size limit");
@@ -441,6 +443,7 @@ if (fileSize > MAX_MESSAGE_SIZE) {
 ```
 
 2. **Không thể mở file**
+
 ```cpp
 if (!file.open(QIODevice::ReadOnly)) {
     QMessageBox::critical(this, "Error", "Cannot read file");
@@ -449,6 +452,7 @@ if (!file.open(QIODevice::ReadOnly)) {
 ```
 
 3. **Mất kết nối giữa chừng**
+
 ```cpp
 // Timeout detection
 if (time_since_last_chunk > TIMEOUT) {
@@ -458,6 +462,7 @@ if (time_since_last_chunk > TIMEOUT) {
 ```
 
 4. **Checksum không khớp**
+
 ```cpp
 if (calculated_checksum != header.checksum) {
     request_retransmit_chunk();

@@ -54,11 +54,12 @@ connect_to_server("127.0.0.1", 8080);
 ### Bước 2: Gửi MSG_LOGIN
 
 Client gửi packet đăng nhập với thông tin:
+
 - **msgType**: `MSG_LOGIN` (1)
 - **sender**: Username muốn sử dụng (tối đa 32 ký tự)
 
 ```
-Client → Server: 
+Client → Server:
 PacketHeader {
     msgType = MSG_LOGIN,
     sender = "alice",
@@ -69,6 +70,7 @@ PacketHeader {
 ### Bước 3: Nhận phản hồi
 
 **Thành công** - Server gửi `MSG_ACK`:
+
 ```
 Server → Client:
 PacketHeader {
@@ -76,10 +78,12 @@ PacketHeader {
     ...
 }
 ```
+
 - Client được thêm vào danh sách người dùng
 - Tự động subscribe topic cùng tên với username (personal topic)
 
 **Thất bại** - Server gửi `MSG_ERROR`:
+
 ```
 Server → Client:
 PacketHeader {
@@ -91,6 +95,7 @@ Payload: "Username already exists"
 ```
 
 Lý do thất bại có thể là:
+
 - Username đã được sử dụng
 - Username không hợp lệ (rỗng hoặc chứa ký tự đặc biệt)
 
@@ -111,6 +116,7 @@ PacketHeader {
 ```
 
 Server xác nhận:
+
 ```
 Server → Client:
 PacketHeader {
@@ -121,6 +127,7 @@ PacketHeader {
 ```
 
 **Lưu ý quan trọng:**
+
 - Mỗi user khi đăng nhập tự động subscribe topic cùng tên với username
 - Có thể subscribe nhiều topics cùng lúc
 - Để chat riêng với user "bob", subscribe topic "bob"
@@ -190,11 +197,13 @@ while (connected) {
 Để chat riêng với một người, sử dụng username của họ làm topic:
 
 **Bước 1**: Subscribe topic của người đó
+
 ```
 alice → Server: MSG_SUBSCRIBE (topic="bob")
 ```
 
 **Bước 2**: Gửi tin nhắn đến topic đó
+
 ```
 alice → Server: MSG_PUBLISH_TEXT (topic="bob", payload="Hi Bob!")
 ```
@@ -297,16 +306,19 @@ Server → Client: MSG_ACK
 ### MainWindow Components
 
 1. **Server Connection Panel**
+
    - Server IP input
    - Username input
    - Connect/Disconnect button
 
 2. **Topic Management**
+
    - Subscribe topic input
    - Subscribe/Unsubscribe buttons
    - List of subscribed topics
 
 3. **Chat Panel**
+
    - Message display area (QTextEdit)
    - Message input field
    - Topic/Recipient selector
@@ -321,14 +333,17 @@ Server → Client: MSG_ACK
 ### Lỗi thường gặp
 
 1. **Kết nối thất bại**
+
    - Kiểm tra server có đang chạy
    - Kiểm tra firewall/port forwarding
 
 2. **Login thất bại**
+
    - Username đã tồn tại → chọn username khác
    - Username không hợp lệ → sử dụng chữ cái/số
 
 3. **Không nhận được tin nhắn**
+
    - Kiểm tra đã subscribe topic chưa
    - Kiểm tra kết nối vẫn còn active
 
@@ -390,6 +405,7 @@ Server → Client: MSG_ACK
 ## 📝 Tóm tắt
 
 Hệ thống chat Pub/Sub cung cấp:
+
 - ✅ Chat linh hoạt theo topics
 - ✅ Chat riêng tư 1-1
 - ✅ Chat nhóm nhiều người
@@ -400,5 +416,6 @@ Hệ thống chat Pub/Sub cung cấp:
 ---
 
 **Xem thêm:**
+
 - [Giao thức chi tiết](GIAO_THUC.md)
 - [Hướng dẫn gửi file](GUI_FILE.md)
